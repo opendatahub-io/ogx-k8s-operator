@@ -3206,6 +3206,8 @@ spec:
         command:
         - /manager
         env:
+        - name: GOMEMLIMIT
+          value: 800MiB
         - name: OPERATOR_VERSION
           value: latest
         - name: RELATED_IMAGE_RH_DISTRIBUTION
