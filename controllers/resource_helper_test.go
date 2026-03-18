@@ -72,7 +72,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					{Name: "HF_HOME", Value: "/.llama"},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "8321"},
-					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
+					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/config.yaml"},
 				},
 			},
 		},
@@ -120,7 +120,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					{Name: "HF_HOME", Value: "/custom/path"},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "9000"},
-					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
+					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/config.yaml"},
 					{Name: "TEST_ENV", Value: "test-value"},
 				},
 				VolumeMounts: []corev1.VolumeMount{{
@@ -164,7 +164,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					{Name: "HF_HOME", Value: "/.llama"},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "8321"},
-					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
+					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/config.yaml"},
 				},
 			},
 		},
@@ -197,7 +197,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					{Name: "HF_HOME", Value: "/.llama"},
 					{Name: "LLS_WORKERS", Value: "4"},
 					{Name: "LLS_PORT", Value: "8321"},
-					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
+					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/config.yaml"},
 				},
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "lls-storage",
@@ -239,7 +239,7 @@ func TestBuildContainerSpec(t *testing.T) {
 					{Name: "HF_HOME", Value: llamav1alpha1.DefaultMountPath},
 					{Name: "LLS_WORKERS", Value: "1"},
 					{Name: "LLS_PORT", Value: "8321"},
-					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/run.yaml"},
+					{Name: "LLAMA_STACK_CONFIG", Value: "/etc/llama-stack/config.yaml"},
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{
@@ -648,6 +648,108 @@ func TestPodOverridesWithoutServiceAccount(t *testing.T) {
 	if deployment.Spec.Template.Spec.ServiceAccountName != instance.Name+"-sa" {
 		t.Errorf("expected default ServiceAccountName when not explicitly provided, got %s", deployment.Spec.Template.Spec.ServiceAccountName)
 	}
+}
+
+func TestPodOverridesWithTerminationGracePeriod(t *testing.T) {
+	gracePeriod := int64(120)
+	instance := &llamav1alpha1.LlamaStackDistribution{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "test-namespace",
+		},
+		Spec: llamav1alpha1.LlamaStackDistributionSpec{
+			Server: llamav1alpha1.ServerSpec{
+				PodOverrides: &llamav1alpha1.PodOverrides{
+					TerminationGracePeriodSeconds: &gracePeriod,
+				},
+			},
+		},
+	}
+	deployment := &appsv1.Deployment{
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	configurePodOverrides(instance, &deployment.Spec.Template.Spec)
+
+	require.NotNil(t, deployment.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	assert.Equal(t, int64(120), *deployment.Spec.Template.Spec.TerminationGracePeriodSeconds)
+}
+
+func TestPodOverridesWithTerminationGracePeriodZero(t *testing.T) {
+	// Ensures we distinguish "not set" (nil) from "set to 0" (immediate termination)
+	gracePeriod := int64(0)
+	instance := &llamav1alpha1.LlamaStackDistribution{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "test-namespace",
+		},
+		Spec: llamav1alpha1.LlamaStackDistributionSpec{
+			Server: llamav1alpha1.ServerSpec{
+				PodOverrides: &llamav1alpha1.PodOverrides{
+					TerminationGracePeriodSeconds: &gracePeriod,
+				},
+			},
+		},
+	}
+	deployment := &appsv1.Deployment{
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	configurePodOverrides(instance, &deployment.Spec.Template.Spec)
+
+	require.NotNil(t, deployment.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	assert.Equal(t, int64(0), *deployment.Spec.Template.Spec.TerminationGracePeriodSeconds)
+}
+
+func TestPodOverridesWithoutTerminationGracePeriod(t *testing.T) {
+	instance := &llamav1alpha1.LlamaStackDistribution{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-instance",
+			Namespace: "test-namespace",
+		},
+		Spec: llamav1alpha1.LlamaStackDistributionSpec{
+			Server: llamav1alpha1.ServerSpec{
+				PodOverrides: &llamav1alpha1.PodOverrides{},
+			},
+		},
+	}
+	deployment := &appsv1.Deployment{
+		Spec: appsv1.DeploymentSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "test-container",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	configurePodOverrides(instance, &deployment.Spec.Template.Spec)
+
+	assert.Nil(t, deployment.Spec.Template.Spec.TerminationGracePeriodSeconds)
 }
 
 func TestValidateConfigMapKeys(t *testing.T) {

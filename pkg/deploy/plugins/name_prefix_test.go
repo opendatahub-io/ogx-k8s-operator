@@ -96,7 +96,7 @@ func TestNamePrefixTransformer(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, len(tc.initialResources), resMap.Size())
 
-				actualFinalNames := []string{}
+				actualFinalNames := make([]string, 0, resMap.Size())
 				for _, r := range resMap.Resources() {
 					actualFinalNames = append(actualFinalNames, r.GetName())
 				}

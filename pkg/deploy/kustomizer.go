@@ -177,14 +177,24 @@ func patchResource(ctx context.Context, cli client.Client, desired, existing *un
 		return nil
 	}
 
-	if existing.GetKind() == "PersistentVolumeClaim" {
+	switch existing.GetKind() {
+	case "PersistentVolumeClaim":
 		logger.V(1).Info("Skipping PVC patch - PVCs are immutable after creation",
 			"name", existing.GetName(),
 			"namespace", existing.GetNamespace())
 		return nil
-	} else if existing.GetKind() == "Service" {
+	case "Service":
 		if err := compare.CheckAndLogServiceChanges(ctx, cli, desired); err != nil {
 			return fmt.Errorf("failed to validate resource mutations while patching: %w", err)
+		}
+	case deploymentKind:
+		// Check for legacy CA bundle volumes and use full replacement to avoid SSA conflicts
+		if hasLegacyCABundleVolumes(ctx, existing) {
+			logger.Info("Detected legacy CA bundle volumes, using full replacement instead of SSA",
+				"deployment", existing.GetName(),
+				"namespace", existing.GetNamespace())
+			desired.SetResourceVersion(existing.GetResourceVersion())
+			return cli.Update(ctx, desired)
 		}
 	}
 
@@ -228,6 +238,11 @@ func applyPlugins(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStack
 		return fmt.Errorf("failed to apply field transformer: %w", err)
 	}
 
+	// Apply NetworkPolicy transformer to configure ingress rules based on spec.network
+	if err := applyNetworkPolicyTransformer(resMap, ownerInstance); err != nil {
+		return fmt.Errorf("failed to apply NetworkPolicy transformer: %w", err)
+	}
+
 	if isAutoscalingEnabled(ownerInstance) {
 		if err := removeDeploymentReplicas(*resMap); err != nil {
 			return fmt.Errorf("failed to strip replicas for autoscaling: %w", err)
@@ -235,6 +250,23 @@ func applyPlugins(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStack
 	}
 
 	return nil
+}
+
+// applyNetworkPolicyTransformer applies the NetworkPolicy transformer plugin.
+func applyNetworkPolicyTransformer(resMap *resmap.ResMap, ownerInstance *llamav1alpha1.LlamaStackDistribution) error {
+	operatorNS, err := GetOperatorNamespace()
+	if err != nil {
+		operatorNS = "llama-stack-k8s-operator-system"
+	}
+
+	npTransformer := plugins.CreateNetworkPolicyTransformer(plugins.NetworkPolicyTransformerConfig{
+		InstanceName:      ownerInstance.GetName(),
+		ServicePort:       GetServicePort(ownerInstance),
+		OperatorNamespace: operatorNS,
+		NetworkSpec:       ownerInstance.Spec.Network,
+	})
+
+	return npTransformer.Transform(*resMap)
 }
 
 // removeDeploymentReplicas deletes spec.replicas from Deployment manifests so that
@@ -276,17 +308,14 @@ func getFieldMappings(ownerInstance *llamav1alpha1.LlamaStackDistribution) []plu
 	serviceAccountName := instanceName + "-sa"
 	servicePort := getServicePort(ownerInstance)
 	storageSize := getStorageSize(ownerInstance)
-	operatorNS := getOperatorNamespace()
 	instanceLabelPath := "/app.kubernetes.io~1instance"
 
-	return buildFieldMappings(instanceName, instanceNamespace, serviceAccountName, servicePort, storageSize, operatorNS, instanceLabelPath, ownerInstance.Spec.Replicas)
+	return buildFieldMappings(instanceName, instanceNamespace, serviceAccountName, servicePort, storageSize, instanceLabelPath, ownerInstance.Spec.Replicas)
 }
 
 // buildFieldMappings constructs the field mappings array.
-//
-//nolint:funlen // mappings list is long but straightforward
 func buildFieldMappings(instanceName, instanceNamespace, serviceAccountName string,
-	servicePort any, storageSize, operatorNS, instanceLabelPath string, replicas int32) []plugins.FieldMapping {
+	servicePort any, storageSize, instanceLabelPath string, replicas int32) []plugins.FieldMapping {
 	var replicaSourceValue any = replicas
 	return []plugins.FieldMapping{
 		{
@@ -360,33 +389,6 @@ func buildFieldMappings(instanceName, instanceNamespace, serviceAccountName stri
 		},
 		{
 			SourceValue:       instanceName,
-			TargetField:       "/spec/podSelector/matchLabels" + instanceLabelPath,
-			TargetKind:        "NetworkPolicy",
-			CreateIfNotExists: true,
-		},
-		{
-			SourceValue:       servicePort,
-			DefaultValue:      llamav1alpha1.DefaultServerPort,
-			TargetField:       "/spec/ingress/0/ports/0/port",
-			TargetKind:        "NetworkPolicy",
-			CreateIfNotExists: true,
-		},
-		{
-			SourceValue:       servicePort,
-			DefaultValue:      llamav1alpha1.DefaultServerPort,
-			TargetField:       "/spec/ingress/1/ports/0/port",
-			TargetKind:        "NetworkPolicy",
-			CreateIfNotExists: true,
-		},
-		{
-			SourceValue:       operatorNS,
-			DefaultValue:      "llama-stack-k8s-operator-system",
-			TargetField:       "/spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name",
-			TargetKind:        "NetworkPolicy",
-			CreateIfNotExists: true,
-		},
-		{
-			SourceValue:       instanceName,
 			TargetField:       "/spec/selector/matchLabels" + instanceLabelPath,
 			TargetKind:        "PodDisruptionBudget",
 			CreateIfNotExists: true,
@@ -416,15 +418,6 @@ func getServicePort(instance *llamav1alpha1.LlamaStackDistribution) any {
 	}
 	// Returning nil signals the field transformer to use the default value.
 	return nil
-}
-
-// getOperatorNamespace returns the operator namespace or empty string if not available.
-func getOperatorNamespace() string {
-	if ns, err := GetOperatorNamespace(); err == nil {
-		return ns
-	}
-	// Returning empty string signals the field transformer to use the default value.
-	return ""
 }
 
 func isAutoscalingEnabled(instance *llamav1alpha1.LlamaStackDistribution) bool {
@@ -676,6 +669,46 @@ func FilterExcludeKinds(resMap *resmap.ResMap, kindsToExclude []string) (*resmap
 		}
 	}
 	return &filteredResMap, nil
+}
+
+// hasLegacyCABundleVolumes detects if a deployment has legacy CA bundle volumes
+// from the old operator that used emptyDir + ConfigMap pattern.
+func hasLegacyCABundleVolumes(ctx context.Context, deployment *unstructured.Unstructured) bool {
+	logger := log.FromContext(ctx)
+
+	volumes, found, err := unstructured.NestedSlice(deployment.Object, "spec", "template", "spec", "volumes")
+	if err != nil || !found {
+		return false
+	}
+
+	for _, vol := range volumes {
+		volumeMap, ok := vol.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		volumeName, _, _ := unstructured.NestedString(volumeMap, "name")
+
+		// Legacy pattern: volume named "ca-bundle" with emptyDir
+		if volumeName == "ca-bundle" {
+			if _, hasEmptyDir := volumeMap["emptyDir"]; hasEmptyDir {
+				logger.V(1).Info("Found legacy ca-bundle emptyDir volume",
+					"deployment", deployment.GetName(),
+					"namespace", deployment.GetNamespace())
+				return true
+			}
+		}
+
+		// Legacy pattern: volume named "ca-bundle-source" (ConfigMap source)
+		if volumeName == "ca-bundle-source" {
+			logger.V(1).Info("Found legacy ca-bundle-source volume",
+				"deployment", deployment.GetName(),
+				"namespace", deployment.GetNamespace())
+			return true
+		}
+	}
+
+	return false
 }
 
 // CheckClusterRoleExists checks if a RoleBinding should be skipped due to missing SCC ClusterRole.

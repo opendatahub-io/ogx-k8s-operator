@@ -154,7 +154,7 @@ func generateCertificates(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	// Execute the script
-	cmd := exec.Command("bash", scriptPath)
+	cmd := exec.CommandContext(t.Context(), "bash", scriptPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("Certificate generation script output: %s", string(output))

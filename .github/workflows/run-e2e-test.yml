@@ -25,15 +25,15 @@ jobs:
       run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Create kind config
         run: |
@@ -64,7 +64,7 @@ jobs:
 
       - name: Create k8s Kind Cluster
         id: kind
-        uses: helm/kind-action@92086f6be054225fa813e0a4b13787fc9088faab # v1.13.0
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           registry: true
           registry_name: kind-registry
@@ -82,6 +82,9 @@ jobs:
 
       - name: Push operator image to local registry
         run: |
+          echo '{"insecure-registries": ["kind-registry:5000"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          until docker exec kind-registry true 2>/dev/null; do sleep 1; done
           docker push kind-registry:5000/llama-stack-k8s-operator:latest
 
       - name: Deploy operator
@@ -125,7 +128,7 @@ jobs:
 
       - name: Upload all logs to artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

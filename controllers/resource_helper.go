@@ -106,14 +106,14 @@ WORKERS=${LLS_WORKERS:-1}
 
 # Execute the appropriate CLI based on version
 case $VERSION_CODE in
-    0) python3 -m llama_stack.distribution.server.server --config /etc/llama-stack/run.yaml ;;
-    1) python3 -m llama_stack.core.server.server /etc/llama-stack/run.yaml ;;
+    0) python3 -m llama_stack.distribution.server.server --config /etc/llama-stack/config.yaml ;;
+    1) python3 -m llama_stack.core.server.server /etc/llama-stack/config.yaml ;;
     2) exec uvicorn llama_stack.core.server.server:create_app --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" --factory ;;
     *) echo "Invalid version code: $VERSION_CODE, using uvicorn CLI command"; \
        exec uvicorn llama_stack.core.server.server:create_app --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" --factory ;;
 esac`
 
-const llamaStackConfigPath = "/etc/llama-stack/run.yaml"
+const llamaStackConfigPath = "/etc/llama-stack/config.yaml"
 
 // validateConfigMapKeys validates that all ConfigMap keys contain only safe characters.
 // Note: This function validates key names only. PEM content validation is performed
@@ -531,6 +531,11 @@ func configurePodOverrides(instance *llamav1alpha1.LlamaStackDistribution, podSp
 			if len(podSpec.Containers) > 0 {
 				podSpec.Containers[0].VolumeMounts = append(podSpec.Containers[0].VolumeMounts, instance.Spec.Server.PodOverrides.VolumeMounts...)
 			}
+		}
+
+		// Apply termination grace period if specified
+		if instance.Spec.Server.PodOverrides.TerminationGracePeriodSeconds != nil {
+			podSpec.TerminationGracePeriodSeconds = instance.Spec.Server.PodOverrides.TerminationGracePeriodSeconds
 		}
 	}
 }

@@ -123,8 +123,8 @@ GOLANGCI_TMP_FILE = .golangci.mktmp.yml
 .PHONY: fmt
 fmt: golangci-lint yq ## Formats code and imports.
 	go fmt ./...
-	$(YQ) e '.linters = {"disable-all": true, "enable": ["gci"]}' .golangci.yml  > $(GOLANGCI_TMP_FILE)
-	$(GOLANGCI_LINT) run --config=$(GOLANGCI_TMP_FILE) --fix
+	$(YQ) e '.version = "2" | .formatters.enable = ["gci"] | .formatters.settings.gci = .linters.settings.gci' .golangci.yml > $(GOLANGCI_TMP_FILE)
+	$(GOLANGCI_LINT) fmt --config=$(GOLANGCI_TMP_FILE)
 
 .PHONY: clean
 clean: ## Remove temporary files, caches, and downloaded tools
@@ -141,7 +141,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests. Use TEST_PKGS and TEST_FLAGS to customize.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $(TEST_PKGS) $(TEST_FLAGS)
+	GOTOOLCHAIN=go1.25.5+auto KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $(TEST_PKGS) $(TEST_FLAGS)
 
 .PHONY: test-e2e
 test-e2e: ## Run e2e tests
@@ -227,6 +227,42 @@ else
 endif
 	@echo "Successfully built multi-arch image: ${IMG}"
 
+# PLATFORM defines the target platform for single-arch image builds used by CI matrix jobs.
+# Each architecture is built natively on its own runner (e.g., ARM64 on ARM64 runner),
+# ensuring CGO_ENABLED=1 with full OpenSSL FIPS support for all architectures.
+PLATFORM ?= linux/amd64
+
+.PHONY: image-build-push-single
+image-build-push-single: ## Build and push a single-arch image (set PLATFORM and IMG)
+	@echo "Building and pushing single-arch image for platform: $(PLATFORM)"
+ifeq ($(CONTAINER_TOOL),docker)
+	- $(CONTAINER_TOOL) buildx create --name x-builder 2>/dev/null || true
+	$(CONTAINER_TOOL) buildx use x-builder
+	$(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORM) --tag ${IMG} .
+else
+	$(CONTAINER_TOOL) build --platform $(PLATFORM) -t ${IMG} .
+	$(CONTAINER_TOOL) push ${IMG}
+endif
+	@echo "Successfully pushed single-arch image: ${IMG} ($(PLATFORM))"
+
+# ARCH_IMGS is a space-separated list of per-architecture image references
+# used to create a multi-arch manifest (e.g., "myregistry/myimage:v1-amd64 myregistry/myimage:v1-arm64").
+ARCH_IMGS ?=
+
+.PHONY: image-create-manifest
+image-create-manifest: ## Create and push a multi-arch manifest from per-arch images (set IMG and ARCH_IMGS)
+	@echo "Creating multi-arch manifest: ${IMG}"
+ifeq ($(CONTAINER_TOOL),docker)
+	- $(CONTAINER_TOOL) buildx create --name x-builder 2>/dev/null || true
+	$(CONTAINER_TOOL) buildx use x-builder
+	$(CONTAINER_TOOL) buildx imagetools create -t ${IMG} $(ARCH_IMGS)
+else
+	$(CONTAINER_TOOL) manifest rm ${IMG} 2>/dev/null || true
+	$(CONTAINER_TOOL) manifest create ${IMG} $(ARCH_IMGS)
+	$(CONTAINER_TOOL) manifest push ${IMG}
+endif
+	@echo "Successfully pushed multi-arch manifest: ${IMG}"
+
 .PHONY: image-build-arm
 image-build-arm: ## Build ARM64 image with the manager
 	$(CONTAINER_TOOL) build --platform linux/arm64 -t ${IMG} .
@@ -289,7 +325,7 @@ CRD_REF_DOCS ?= $(LOCALBIN)/crd-ref-docs
 KUSTOMIZE_VERSION ?= v5.4.3
 CONTROLLER_TOOLS_VERSION ?= v0.17.2
 ENVTEST_VERSION ?= release-0.19
-GOLANGCI_LINT_VERSION ?= v1.64.4
+GOLANGCI_LINT_VERSION ?= v2.8.0
 YQ_VERSION ?= v4.45.3
 YAMLFMT_VERSION ?= v0.12.0
 CRD_REF_DOCS_VERSION = v0.2.0
@@ -312,7 +348,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 .PHONY: yq
 yq: $(YQ) ## Download yq locally if necessary.

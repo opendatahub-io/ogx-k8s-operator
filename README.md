@@ -94,29 +94,28 @@ spec:
 ```
 3. Verify the server pod is running in the user defined namespace.
 
-### Using a ConfigMap for run.yaml configuration
+### Using a ConfigMap for config.yaml configuration
 
-A ConfigMap can be used to store run.yaml configuration for each LlamaStackDistribution.
+A ConfigMap can be used to store config.yaml configuration for each LlamaStackDistribution.
 Updates to the ConfigMap will restart the Pod to load the new data.
 
-Example to create a run.yaml ConfigMap, and a LlamaStackDistribution that references it:
+Example to create a config.yaml ConfigMap, and a LlamaStackDistribution that references it:
 ```
 kubectl apply -f config/samples/example-with-configmap.yaml
 ```
 
 ## Enabling Network Policies
 
-The operator can create an ingress-only `NetworkPolicy` for every `LlamaStackDistribution` to ensure traffic is limited to:
-- Other pods in the same namespace that are part of the Llama Stack deployment (`app.kubernetes.io/part-of: llama-stack`)
-- Components that run inside the operator namespace (default: `llama-stack-k8s-operator-system`)
+The operator can create an ingress-only `NetworkPolicy` for each `LlamaStackDistribution`. By default, traffic is limited to:
+- All pods within the same namespace
+- The operator namespace (`llama-stack-k8s-operator-system`)
 
-This behavior is guarded by a feature flag and is disabled by default to avoid interfering with existing cluster-level policies. To enable it:
+### Enable the Feature Flag
 
-1. Identify the namespace where the operator is running. If you used the provided manifests, it is `llama-stack-k8s-operator-system`.
-2. Create or update the `llama-stack-operator-config` ConfigMap in that namespace so the `featureFlags` entry enables the network policy flag.
+Network policies are disabled by default. Enable via ConfigMap:
 
 ```bash
-cat <<'EOF' > feature-flags.yaml
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -127,12 +126,38 @@ data:
     enableNetworkPolicy:
       enabled: true
 EOF
-
-kubectl apply -f feature-flags.yaml
 ```
 
-Within the next reconciliation loop the operator will begin creating a `<name>-network-policy` resource for each distribution.
-Set `enabled: false` (or remove the block) to turn the feature back off; the operator will delete the previously managed policies.
+### Configure Per-Instance Access
+
+Use `spec.network` to customize access controls:
+
+```yaml
+apiVersion: llamastack.io/v1alpha1
+kind: LlamaStackDistribution
+metadata:
+  name: my-llsd
+spec:
+  server:
+    distribution:
+      name: starter
+  network:
+    exposeRoute: false          # Set true to create an Ingress for external access
+    allowedFrom:
+      namespaces:               # Explicit namespace names
+        - my-app-namespace
+        - monitoring
+      labels:                   # Namespaces matching these label keys
+        - team=frontend
+```
+
+| Field | Description |
+|-------|-------------|
+| `network.exposeRoute` | When `true`, creates an Ingress for external access (default: `false`) |
+| `network.allowedFrom.namespaces` | List of namespace names allowed to access the service. Use `"*"` to allow all namespaces |
+| `network.allowedFrom.labels` | List of namespace label keys. Namespaces with these labels are allowed |
+
+Set `enabled: false` in the ConfigMap to disable; the operator will delete the managed policies.
 
 ## Image Mapping Overrides
 
@@ -213,8 +238,9 @@ This will cause all LlamaStackDistribution resources using the `starter` distrib
 
   **Note**:
   - The `image-buildx` target works with both Docker and Podman. It will automatically detect which tool is being used.
-  - **Native cross-compilation**: The Dockerfile uses `--platform=$BUILDPLATFORM` to run Go compilation natively on the build host, avoiding QEMU emulation for the build process. This dramatically improves build speed and reliability. Only the minimal final stage (package installation) runs under QEMU for cross-platform builds.
-  - **FIPS adherence**: Native builds use `CGO_ENABLED=1` with full OpenSSL FIPS support. Cross-compiled builds use `CGO_ENABLED=0` with pure Go FIPS (via `GOEXPERIMENT=strictfipsruntime`). Both approaches are Designed for FIPS.
+  - **Native builds in CI**: CI workflows use a matrix strategy with native runners for each architecture (AMD64 and ARM64). Each architecture is built on its own runner, avoiding QEMU emulation entirely. Per-architecture images are pushed separately, then combined into a single multi-arch manifest list. This ensures `CGO_ENABLED=1` with full OpenSSL FIPS support for all architectures.
+  - **Local cross-compilation**: For local development, the Dockerfile uses `--platform=$BUILDPLATFORM` to run Go compilation natively on the build host. When cross-compiling (e.g., building ARM64 on an AMD64 host), `CGO_ENABLED=0` is used with pure Go FIPS (via `GOEXPERIMENT=strictfipsruntime`). Native local builds use `CGO_ENABLED=1` with full OpenSSL FIPS support.
+  - **FIPS adherence**: All CI-produced images use `CGO_ENABLED=1` with full OpenSSL FIPS support via native builds on architecture-matched runners.
   - For Docker: Multi-arch builds require Docker Buildx. Ensure Docker Buildx is set up:
 
     ```commandline
@@ -223,6 +249,19 @@ This will cause all LlamaStackDistribution resources using the `starter` distrib
 
   - For Podman: Podman 4.0+ supports `podman buildx` (experimental). If buildx is unavailable, the Makefile will automatically fall back to using podman's native manifest-based multi-arch build approach.
   - The resulting images are multi-arch manifest lists, which means Kubernetes will automatically select the correct architecture when pulling the image.
+
+  **CI Build Targets**:
+
+  The CI workflows use the following Makefile targets for the matrix-based build strategy:
+
+  ```commandline
+  # Build and push a single-arch image (used by each matrix job on its native runner)
+  make image-build-push-single PLATFORM=linux/amd64 IMG=quay.io/<username>/llama-stack-k8s-operator:<tag>-amd64
+
+  # Create a multi-arch manifest from per-arch images (used by the final manifest job)
+  make image-create-manifest IMG=quay.io/<username>/llama-stack-k8s-operator:<tag> \
+    ARCH_IMGS="quay.io/<username>/llama-stack-k8s-operator:<tag>-amd64 quay.io/<username>/llama-stack-k8s-operator:<tag>-arm64"
+  ```
 
 - Building ARM64-only images
 
