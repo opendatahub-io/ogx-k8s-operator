@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -1572,8 +1573,11 @@ func (r *LlamaStackDistributionReconciler) processODHConfigMapKeys(configMap *co
 // rejects invalid X.509 certificates.
 // Returns: (certificates as strings, total size, certificate count, error).
 func extractValidCertificates(data []byte, keyName string) ([]string, int, int, error) {
-	if len(data) == 0 {
-		return nil, 0, 0, fmt.Errorf("failed to process CA bundle key '%s': contains no data", keyName)
+	// Trim whitespace to detect effectively empty data.
+	// Empty or whitespace-only data is valid (e.g., ODH bundle with no custom CAs).
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, 0, 0, nil
 	}
 
 	var certificates []string
