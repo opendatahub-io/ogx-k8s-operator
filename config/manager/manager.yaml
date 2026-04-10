@@ -55,7 +55,7 @@ spec:
         - name: GOMEMLIMIT
           value: "800MiB"
         - name: OPERATOR_VERSION
-          value: "latest"
+          value: "0.9.0"
         - name: RELATED_IMAGE_RH_DISTRIBUTION
           value: ""
         image: controller:latest

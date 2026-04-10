@@ -1,6 +1,6 @@
 {
-  "starter": "docker.io/llamastack/distribution-starter:0.6.0",
-  "remote-vllm": "docker.io/llamastack/distribution-remote-vllm:0.6.0",
-  "meta-reference-gpu": "docker.io/llamastack/distribution-meta-reference-gpu:0.6.0",
-  "postgres-demo": "docker.io/llamastack/distribution-postgres-demo:0.6.0"
+  "starter": "docker.io/llamastack/distribution-starter:0.7.1",
+  "remote-vllm": "docker.io/llamastack/distribution-remote-vllm:0.7.1",
+  "meta-reference-gpu": "docker.io/llamastack/distribution-meta-reference-gpu:0.7.1",
+  "postgres-demo": "docker.io/llamastack/distribution-postgres-demo:0.7.1"
 }
