@@ -740,6 +740,166 @@ func TestHasLegacyCABundleVolumes(t *testing.T) {
 	})
 }
 
+// TestHasStaleUserConfigVolume tests detection of a stale user-config volume
+// (present in existing Deployment but absent from desired).
+func TestHasStaleUserConfigVolume(t *testing.T) {
+	makeDeployment := func(volumes ...corev1.Volume) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Volumes: volumes},
+				},
+			},
+		}
+	}
+
+	userConfigVol := corev1.Volume{
+		Name: "user-config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "my-config"},
+			},
+		},
+	}
+	storageVol := corev1.Volume{
+		Name:         "lls-storage",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+
+	t.Run("returns true when existing has user-config and desired does not", func(t *testing.T) {
+		existing := makeDeployment(storageVol, userConfigVol)
+		desired := makeDeployment(storageVol)
+		require.True(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when both existing and desired have user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol, userConfigVol)
+		desired := makeDeployment(storageVol, userConfigVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when neither has user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol)
+		desired := makeDeployment(storageVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when only desired has user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol)
+		desired := makeDeployment(storageVol, userConfigVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when no volumes present in either", func(t *testing.T) {
+		existing := makeDeployment()
+		desired := makeDeployment()
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+}
+
+// TestUserConfigVolumeRemoval tests that removing spec.server.userConfig from the LLSD
+// causes the "user-config" volume to be removed from the Deployment.
+func TestUserConfigVolumeRemoval(t *testing.T) {
+	ctx, testNs, owner := setupApplyResourcesTest(t, "userconfig-removal")
+
+	// Create an existing Deployment that has a user-config volume (simulates operator
+	// creating the Deployment via cli.Create when userConfig was set, without SSA
+	// field manager tracking).
+	existingDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-deployment",
+			Namespace: testNs,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(owner, owner.GroupVersionKind()),
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "test"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "test"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "test:v1"},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "lls-storage",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						// This volume was set when userConfig was configured;
+						// it should be removed when userConfig is cleared.
+						{
+							Name: "user-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "my-llama-config",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, existingDeployment))
+
+	// Desired Deployment reflects the LLSD after userConfig has been removed —
+	// only the storage volume remains.
+	desiredDeployment := newTestResource(t, "apps/v1", "Deployment", "test-deployment", testNs, map[string]any{
+		"replicas": int32(1),
+		"selector": map[string]any{
+			"matchLabels": map[string]any{"app": "test"},
+		},
+		"template": map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{"app": "test"},
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "main", "image": "test:v2"},
+				},
+				"volumes": []any{
+					map[string]any{
+						"name":     "lls-storage",
+						"emptyDir": map[string]any{},
+					},
+				},
+			},
+		},
+	})
+
+	resMap := resmap.New()
+	require.NoError(t, resMap.Append(desiredDeployment))
+
+	require.NoError(t, ApplyResources(ctx, k8sClient, scheme.Scheme, owner, &resMap))
+
+	updated := &appsv1.Deployment{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: testNs}, updated))
+
+	// Verify the user-config volume was removed.
+	for _, vol := range updated.Spec.Template.Spec.Volumes {
+		require.NotEqual(t, "user-config", vol.Name, "stale user-config volume should have been removed from the Deployment")
+	}
+	// Verify the storage volume still exists.
+	found := false
+	for _, vol := range updated.Spec.Template.Spec.Volumes {
+		if vol.Name == "lls-storage" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "lls-storage volume should still be present")
+}
+
 // TestLegacyCABundleUpgrade tests that deployments with legacy CA bundle volumes
 // are replaced instead of patched to avoid SSA conflicts.
 func TestLegacyCABundleUpgrade(t *testing.T) {
@@ -889,6 +1049,56 @@ func TestLegacyCABundleUpgrade(t *testing.T) {
 	require.Empty(t, updatedDeployment.Spec.Template.Spec.InitContainers, "legacy init containers should be removed")
 }
 
+// ptr is a helper function to get a pointer to a value.
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func TestGetFieldMappings_RecreateStrategyWithStorage(t *testing.T) {
+	t.Run("includes Recreate strategy when storage is configured", func(t *testing.T) {
+		owner := &llamav1alpha1.LlamaStackDistribution{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			Spec: llamav1alpha1.LlamaStackDistributionSpec{
+				Replicas: 1,
+				Server: llamav1alpha1.ServerSpec{
+					Storage: &llamav1alpha1.StorageSpec{},
+				},
+			},
+		}
+
+		mappings := getFieldMappings(owner)
+
+		var found bool
+		for _, m := range mappings {
+			if m.TargetField == "/spec/strategy/type" && m.TargetKind == "Deployment" {
+				assert.Equal(t, "Recreate", m.SourceValue)
+				assert.True(t, m.CreateIfNotExists)
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "should include Recreate strategy mapping when storage is configured")
+	})
+
+	t.Run("does not include strategy when storage is nil", func(t *testing.T) {
+		owner := &llamav1alpha1.LlamaStackDistribution{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			Spec: llamav1alpha1.LlamaStackDistributionSpec{
+				Replicas: 1,
+				Server:   llamav1alpha1.ServerSpec{},
+			},
+		}
+
+		mappings := getFieldMappings(owner)
+
+		for _, m := range mappings {
+			if m.TargetField == "/spec/strategy/type" {
+				t.Fatal("should not include strategy mapping when storage is nil")
+			}
+		}
+	})
+}
+
 // resourceToUnstructured converts a kustomize resource to an unstructured object.
 func resourceToUnstructured(t *testing.T, res *kresource.Resource) (*unstructured.Unstructured, error) {
 	t.Helper()
@@ -904,9 +1114,4 @@ func resourceToUnstructured(t *testing.T, res *kresource.Resource) (*unstructure
 	}
 
 	return u, nil
-}
-
-// ptr is a helper function to get a pointer to a value.
-func ptr[T any](v T) *T {
-	return &v
 }
