@@ -50,8 +50,8 @@ const (
 	AdoptStorageAnnotation = "ogx.io/adopt-storage"
 	// AdoptNetworkingAnnotation triggers Service/Ingress adoption from a legacy LlamaStackDistribution.
 	AdoptNetworkingAnnotation = "ogx.io/adopt-networking"
-	// AdoptedFromAnnotation is set on adopted child resources to record the legacy source.
-	AdoptedFromAnnotation = "ogx.io/adopted-from"
+	// AdoptedFromLabel is set on adopted resources to record the legacy source.
+	AdoptedFromLabel = "ogx.io/adopted-from"
 	// AdoptedAtAnnotation is set on adopted child resources with an RFC 3339 timestamp.
 	AdoptedAtAnnotation = "ogx.io/adopted-at"
 )
@@ -631,7 +631,7 @@ func (r *OGXServer) GetAdoptNetworkingSource() string {
 // When the adopt-storage annotation is present, the adopted PVC name is "{legacyName}-pvc".
 // Otherwise the default convention is "{instanceName}-pvc".
 func (r *OGXServer) GetEffectivePVCName() string {
-	if src := r.GetAdoptStorageSource(); src != "" {
+	if src := r.GetAdoptStorageSource(); src != "" && ValidateAdoptionAnnotation(src) == nil {
 		return src + "-pvc"
 	}
 	return r.Name + "-pvc"

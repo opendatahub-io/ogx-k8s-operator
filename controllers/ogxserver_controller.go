@@ -111,7 +111,9 @@ type OGXServerReconciler struct {
 
 // hasOverrideConfig checks if the instance references an override ConfigMap.
 func (r *OGXServerReconciler) hasOverrideConfig(instance *ogxiov1beta1.OGXServer) bool {
-	return instance.Spec.OverrideConfig != nil && instance.Spec.OverrideConfig.Name != ""
+	return instance.Spec.OverrideConfig != nil &&
+		instance.Spec.OverrideConfig.Name != "" &&
+		instance.Spec.OverrideConfig.Key != ""
 }
 
 // hasCACertificates checks if the instance has TLS trust CA certificates configured.
@@ -154,6 +156,10 @@ func (r *OGXServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Reconcile all resources, storing the error for later.
 	reconcileErr := r.reconcileResources(ctx, instance)
+
+	if result, done := r.handleSentinelErrors(ctx, instance, reconcileErr); done {
+		return result, nil
+	}
 
 	// Update the status, passing in any reconciliation error.
 	if statusUpdateErr := r.updateStatus(ctx, instance, reconcileErr); statusUpdateErr != nil {
@@ -231,11 +237,11 @@ func (r *OGXServerReconciler) fetchInstance(ctx context.Context, namespacedName 
 }
 
 // determineKindsToExclude returns a list of resource kinds that should be excluded
-// based on the instance specification.
-func (r *OGXServerReconciler) determineKindsToExclude(instance *ogxiov1beta1.OGXServer) []string {
+// based on the instance specification and adoption annotations.
+func (r *OGXServerReconciler) determineKindsToExclude(instance *ogxiov1beta1.OGXServer, effectivePVCName string) []string {
 	var kinds []string
 
-	if instance.Spec.Workload == nil || instance.Spec.Workload.Storage == nil {
+	if shouldExcludePVC(instance, effectivePVCName) {
 		kinds = append(kinds, "PersistentVolumeClaim")
 	}
 
@@ -245,7 +251,6 @@ func (r *OGXServerReconciler) determineKindsToExclude(instance *ogxiov1beta1.OGX
 		kinds = append(kinds, "NetworkPolicy")
 	}
 
-	// Service is always created in v1beta1 (port always exists via defaults)
 	if !needsPodDisruptionBudget(instance) {
 		kinds = append(kinds, "PodDisruptionBudget")
 	}
@@ -257,10 +262,26 @@ func (r *OGXServerReconciler) determineKindsToExclude(instance *ogxiov1beta1.OGX
 	return kinds
 }
 
+func shouldExcludePVC(instance *ogxiov1beta1.OGXServer, effectivePVCName string) bool {
+	// Suppress PVC creation when the deployment is using an adopted PVC
+	// (either via annotation or discovered by label after annotation removal).
+	if effectivePVCName != instance.Name+"-pvc" {
+		return true
+	}
+
+	return instance.Spec.Workload == nil || instance.Spec.Workload.Storage == nil
+}
+
 // reconcileAllManifestResources applies all manifest-based resources using kustomize.
 func (r *OGXServerReconciler) reconcileAllManifestResources(ctx context.Context, instance *ogxiov1beta1.OGXServer) error {
+	// Resolve the PVC name once — may use annotation or label-based discovery.
+	effectivePVCName, err := r.resolveEffectivePVCName(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("failed to resolve effective PVC name: %w", err)
+	}
+
 	// Build manifest context for Deployment
-	manifestCtx, err := r.buildManifestContext(ctx, instance)
+	manifestCtx, err := r.buildManifestContext(ctx, instance, effectivePVCName)
 	if err != nil {
 		return fmt.Errorf("failed to build manifest context: %w", err)
 	}
@@ -271,7 +292,7 @@ func (r *OGXServerReconciler) reconcileAllManifestResources(ctx context.Context,
 		return fmt.Errorf("failed to render manifests: %w", err)
 	}
 
-	kindsToExclude := r.determineKindsToExclude(instance)
+	kindsToExclude := r.determineKindsToExclude(instance, effectivePVCName)
 	filteredResMap, err := deploy.FilterExcludeKinds(resMap, kindsToExclude)
 	if err != nil {
 		return fmt.Errorf("failed to filter manifests: %w", err)
@@ -404,7 +425,7 @@ func (r *OGXServerReconciler) deleteHorizontalPodAutoscalerIfExists(ctx context.
 }
 
 // buildManifestContext creates the manifest context for Deployment using existing helper functions.
-func (r *OGXServerReconciler) buildManifestContext(ctx context.Context, instance *ogxiov1beta1.OGXServer) (*deploy.ManifestContext, error) {
+func (r *OGXServerReconciler) buildManifestContext(ctx context.Context, instance *ogxiov1beta1.OGXServer, effectivePVCName string) (*deploy.ManifestContext, error) {
 	// Validate distribution configuration
 	if err := r.validateDistribution(instance); err != nil {
 		return nil, err
@@ -416,7 +437,7 @@ func (r *OGXServerReconciler) buildManifestContext(ctx context.Context, instance
 	}
 
 	container := buildContainerSpec(ctx, r, instance, resolvedImage)
-	podSpec := configurePodStorage(ctx, r, instance, container)
+	podSpec := configurePodStorage(ctx, r, instance, container, effectivePVCName)
 
 	// Get override ConfigMap hash if needed
 	var configMapHash string
@@ -456,6 +477,16 @@ func (r *OGXServerReconciler) buildManifestContext(ctx context.Context, instance
 
 // reconcileResources reconciles all resources for the OGXServer instance.
 func (r *OGXServerReconciler) reconcileResources(ctx context.Context, instance *ogxiov1beta1.OGXServer) error {
+	// Run adoption logic before manifest reconciliation so that adopted
+	// resources are available for the kustomize pipeline to reference.
+	adoptResult, err := r.adoptLegacyResources(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("failed to adopt legacy resources: %w", err)
+	}
+	if adoptResult.requeue {
+		return &requeueError{after: adoptResult.requeueAfter}
+	}
+
 	// Reconcile ConfigMaps first
 	if err := r.reconcileConfigMaps(ctx, instance); err != nil {
 		return err
@@ -472,7 +503,58 @@ func (r *OGXServerReconciler) reconcileResources(ctx context.Context, instance *
 		return fmt.Errorf("failed to reconcile Ingress: %w", err)
 	}
 
+	// Clean up adopted networking resources if the annotation was removed.
+	// This runs after normal networking reconciliation to avoid delete-before-create
+	// gaps during the migration-off path.
+	if err := r.cleanupAdoptedNetworking(ctx, instance); err != nil {
+		return fmt.Errorf("failed to clean up adopted networking: %w", err)
+	}
+
 	return nil
+}
+
+// requeueError signals that the reconciler should requeue after a delay
+// without reporting an error to the controller runtime.
+type requeueError struct {
+	after time.Duration
+}
+
+func (e *requeueError) Error() string {
+	return fmt.Sprintf("requeue after %s", e.after)
+}
+
+// terminalError signals a problem that cannot be resolved by retrying.
+// The reconciler sets a status condition and stops without requeueing.
+type terminalError struct {
+	message string
+}
+
+func (e *terminalError) Error() string {
+	return e.message
+}
+
+func (r *OGXServerReconciler) handleSentinelErrors(
+	ctx context.Context, instance *ogxiov1beta1.OGXServer, reconcileErr error,
+) (ctrl.Result, bool) {
+	logger := log.FromContext(ctx)
+
+	var requeueErr *requeueError
+	if errors.As(reconcileErr, &requeueErr) {
+		if statusUpdateErr := r.updateStatus(ctx, instance, nil); statusUpdateErr != nil {
+			logger.Error(statusUpdateErr, "failed to update status during adoption requeue")
+		}
+		return ctrl.Result{RequeueAfter: requeueErr.after}, true
+	}
+
+	var termErr *terminalError
+	if errors.As(reconcileErr, &termErr) {
+		if statusUpdateErr := r.updateStatus(ctx, instance, nil); statusUpdateErr != nil {
+			logger.Error(statusUpdateErr, "failed to update status for terminal error")
+		}
+		return ctrl.Result{}, true
+	}
+
+	return ctrl.Result{}, false
 }
 
 func (r *OGXServerReconciler) reconcileConfigMaps(ctx context.Context, instance *ogxiov1beta1.OGXServer) error {
@@ -601,9 +683,15 @@ func (r *OGXServerReconciler) mapConfigMapToReconcileRequests(ctx context.Contex
 		return nil
 	}
 
-	// List all OGXServer CRs to find which ones reference this ConfigMap.
+	// List relevant OGXServer CRs to find which ones reference this ConfigMap.
+	// User ConfigMaps are namespace-scoped per 003 design, so default to same-namespace
+	// listing. Keep operator config global since it can affect all instances.
 	var instances ogxiov1beta1.OGXServerList
-	if err := r.List(ctx, &instances); err != nil {
+	listOpts := []client.ListOption{client.InNamespace(configMap.Namespace)}
+	if configMap.Name == operatorConfigData {
+		listOpts = nil
+	}
+	if err := r.List(ctx, &instances, listOpts...); err != nil {
 		logger.Error(err, "failed to list OGXServer instances for ConfigMap mapping")
 		return nil
 	}
@@ -873,9 +961,15 @@ func (r *OGXServerReconciler) updateStorageStatus(ctx context.Context, instance 
 	if instance.Spec.Workload == nil || instance.Spec.Workload.Storage == nil {
 		return
 	}
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{Name: instance.GetEffectivePVCName(), Namespace: instance.Namespace}, pvc)
+
+	pvcName, err := r.resolveEffectivePVCName(ctx, instance)
 	if err != nil {
+		SetStorageReadyCondition(&instance.Status, false, fmt.Sprintf("Failed to resolve PVC name: %v", err))
+		return
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: instance.Namespace}, pvc); err != nil {
 		SetStorageReadyCondition(&instance.Status, false, fmt.Sprintf("Failed to get PVC: %v", err))
 		return
 	}
@@ -932,6 +1026,7 @@ func (r *OGXServerReconciler) reconcileOverrideConfigMap(ctx context.Context, in
 
 	logger.V(1).Info("Validating referenced override ConfigMap exists",
 		"configMapName", instance.Spec.OverrideConfig.Name,
+		"configMapKey", instance.Spec.OverrideConfig.Key,
 		"configMapNamespace", configMapNamespace)
 
 	// Read via direct client — user ConfigMaps lack operator labels
@@ -949,10 +1044,19 @@ func (r *OGXServerReconciler) reconcileOverrideConfigMap(ctx context.Context, in
 		}
 		return fmt.Errorf("failed to fetch ConfigMap %s/%s: %w", configMapNamespace, instance.Spec.OverrideConfig.Name, err)
 	}
+	if _, exists := configMap.Data[instance.Spec.OverrideConfig.Key]; !exists {
+		return fmt.Errorf(
+			"failed to find override ConfigMap key '%s' in ConfigMap %s/%s",
+			instance.Spec.OverrideConfig.Key,
+			configMapNamespace,
+			instance.Spec.OverrideConfig.Name,
+		)
+	}
 
 	logger.V(1).Info("Override ConfigMap found and validated",
 		"configMap", configMap.Name,
 		"namespace", configMap.Namespace,
+		"key", instance.Spec.OverrideConfig.Key,
 		"dataKeys", len(configMap.Data))
 	return nil
 }

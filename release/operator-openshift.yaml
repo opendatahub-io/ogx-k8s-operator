@@ -10,7 +10,6 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    cert-manager.io/inject-ca-from: ogx-k8s-operator-system/ogx-k8s-operator-serving-cert
     controller-gen.kubebuilder.io/version: v0.17.2
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
@@ -6869,6 +6868,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: ogx-k8s-operator-webhook-cert
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
   name: ogx-k8s-operator-webhook-service
@@ -6914,13 +6915,7 @@ spec:
           value: 800MiB
         - name: OPERATOR_VERSION
           value: latest
-<<<<<<< HEAD
-        - name: RELATED_IMAGE_RH_DISTRIBUTION
-          value: ""
-        image: quay.io/llamastack/llama-stack-k8s-operator:latest
-=======
         image: quay.io/ogx-ai/ogx-k8s-operator:latest
->>>>>>> bffae1f (feat(api): Add OGXServer CRD types and renamed operator references (#289))
         imagePullPolicy: Always
         livenessProbe:
           httpGet:
@@ -6991,33 +6986,11 @@ spec:
     matchLabels:
       app.kubernetes.io/name: ogx-k8s-operator
 ---
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: ogx-k8s-operator-serving-cert
-  namespace: ogx-k8s-operator-system
-spec:
-  dnsNames:
-  - ogx-k8s-operator-webhook-service.ogx-k8s-operator-system.svc
-  - ogx-k8s-operator-webhook-service.ogx-k8s-operator-system.svc.cluster.local
-  issuerRef:
-    kind: Issuer
-    name: ogx-k8s-operator-selfsigned-issuer
-  secretName: ogx-k8s-operator-webhook-cert
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: ogx-k8s-operator-selfsigned-issuer
-  namespace: ogx-k8s-operator-system
-spec:
-  selfSigned: {}
----
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   annotations:
-    cert-manager.io/inject-ca-from: ogx-k8s-operator-system/ogx-k8s-operator-serving-cert
+    service.beta.openshift.io/inject-cabundle: "true"
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
   name: ogx-k8s-operator-validating-webhook-configuration

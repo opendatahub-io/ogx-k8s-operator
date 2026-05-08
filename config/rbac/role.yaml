@@ -8,21 +8,12 @@ rules:
   - ""
   resources:
   - configmaps
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - persistentvolumeclaims
   verbs:
   - create
   - get
   - list
+  - patch
   - update
   - watch
 - apiGroups:

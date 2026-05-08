@@ -379,7 +379,7 @@ func createCABundleVolume(managedConfigMapName string) corev1.Volume {
 }
 
 // configurePodStorage configures the pod storage and returns the complete pod spec.
-func configurePodStorage(ctx context.Context, r *OGXServerReconciler, instance *ogxiov1beta1.OGXServer, container corev1.Container) corev1.PodSpec {
+func configurePodStorage(ctx context.Context, r *OGXServerReconciler, instance *ogxiov1beta1.OGXServer, container corev1.Container, effectivePVCName string) corev1.PodSpec {
 	fsGroup := FSGroup
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{container},
@@ -389,7 +389,7 @@ func configurePodStorage(ctx context.Context, r *OGXServerReconciler, instance *
 	}
 
 	// Configure storage volumes
-	configureStorage(instance, &podSpec)
+	configureStorage(instance, &podSpec, effectivePVCName)
 
 	// Configure TLS CA bundle (with auto-detection support)
 	configureTLSCABundle(ctx, r, instance, &podSpec)
@@ -406,22 +406,21 @@ func configurePodStorage(ctx context.Context, r *OGXServerReconciler, instance *
 }
 
 // configureStorage handles storage volume configuration.
-func configureStorage(instance *ogxiov1beta1.OGXServer, podSpec *corev1.PodSpec) {
+func configureStorage(instance *ogxiov1beta1.OGXServer, podSpec *corev1.PodSpec, effectivePVCName string) {
 	if instance.Spec.Workload != nil && instance.Spec.Workload.Storage != nil {
-		configurePersistentStorage(instance, podSpec)
+		configurePersistentStorage(podSpec, effectivePVCName)
 	} else {
 		configureEmptyDirStorage(podSpec)
 	}
 }
 
 // configurePersistentStorage sets up PVC-based storage.
-func configurePersistentStorage(instance *ogxiov1beta1.OGXServer, podSpec *corev1.PodSpec) {
-	// Use PVC for persistent storage
+func configurePersistentStorage(podSpec *corev1.PodSpec, pvcName string) {
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: "ogx-storage",
 		VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: instance.GetEffectivePVCName(),
+				ClaimName: pvcName,
 			},
 		},
 	})
@@ -455,7 +454,7 @@ func configureTLSCABundle(ctx context.Context, r *OGXServerReconciler, instance 
 // configureUserConfig handles user configuration setup.
 func configureUserConfig(instance *ogxiov1beta1.OGXServer, podSpec *corev1.PodSpec) {
 	overrideConfig := instance.Spec.OverrideConfig
-	if overrideConfig == nil || overrideConfig.Name == "" {
+	if overrideConfig == nil || overrideConfig.Name == "" || overrideConfig.Key == "" {
 		return
 	}
 
@@ -465,6 +464,12 @@ func configureUserConfig(instance *ogxiov1beta1.OGXServer, podSpec *corev1.PodSp
 			ConfigMap: &corev1.ConfigMapVolumeSource{
 				LocalObjectReference: corev1.LocalObjectReference{
 					Name: overrideConfig.Name,
+				},
+				Items: []corev1.KeyToPath{
+					{
+						Key:  overrideConfig.Key,
+						Path: "config.yaml",
+					},
 				},
 			},
 		},
