@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	llamav1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
+	llamav1alpha1 "github.com/ogx-ai/ogx-k8s-operator/api/v1alpha1"
+	ogxiov1beta1 "github.com/ogx-ai/ogx-k8s-operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -43,6 +44,11 @@ func TestMain(m *testing.M) {
 		logf.Log.Error(err, "failed to add scheme")
 		os.Exit(1)
 	}
+	err = ogxiov1beta1.AddToScheme(scheme.Scheme)
+	if err != nil {
+		logf.Log.Error(err, "failed to add v1beta1 scheme")
+		os.Exit(1)
+	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	if err != nil {
@@ -72,7 +78,7 @@ func newTestResource(t *testing.T, apiVersion, kind, name, namespace string, con
 	}
 
 	switch kind {
-	case "Deployment":
+	case deploymentKind:
 		baseDeploymentContent := map[string]any{
 			"selector": map[string]any{
 				"matchLabels": map[string]any{"app": name},

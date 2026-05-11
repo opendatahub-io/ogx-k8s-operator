@@ -22,14 +22,21 @@ import (
 	"fmt"
 	"os"
 
-	llamaxk8siov1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
-	"github.com/llamastack/llama-stack-k8s-operator/controllers"
-	"github.com/llamastack/llama-stack-k8s-operator/pkg/cluster"
+	ogxiov1beta1 "github.com/ogx-ai/ogx-k8s-operator/api/v1beta1"
+	"github.com/ogx-ai/ogx-k8s-operator/controllers"
+	"github.com/ogx-ai/ogx-k8s-operator/pkg/cluster"
 	"go.uber.org/zap/zapcore"
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -54,12 +61,20 @@ var (
 func init() { //nolint:gochecknoinits
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(llamaxk8siov1alpha1.AddToScheme(scheme))
+	utilruntime.Must(ogxiov1beta1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
-func setupReconciler(ctx context.Context, cli client.Client, mgr ctrl.Manager, clusterInfo *cluster.ClusterInfo) error {
-	reconciler, err := controllers.NewLlamaStackDistributionReconciler(ctx, cli, scheme, clusterInfo)
+func setupWebhook(mgr ctrl.Manager, clusterInfo *cluster.ClusterInfo) error {
+	distNames := make([]string, 0, len(clusterInfo.DistributionImages))
+	for name := range clusterInfo.DistributionImages {
+		distNames = append(distNames, name)
+	}
+	return ogxiov1beta1.SetupWebhookWithManager(mgr, distNames)
+}
+
+func setupReconciler(ctx context.Context, cli client.Client, mgr ctrl.Manager, clusterInfo *cluster.ClusterInfo, directClient client.Reader) error {
+	reconciler, err := controllers.NewOGXServerReconciler(ctx, cli, scheme, clusterInfo, directClient)
 	if err != nil {
 		return fmt.Errorf("failed to create reconciler: %w", err)
 	}
@@ -67,6 +82,31 @@ func setupReconciler(ctx context.Context, cli client.Client, mgr ctrl.Manager, c
 		return fmt.Errorf("failed to create controller: %w", err)
 	}
 	return nil
+}
+
+func newCacheOptions() cache.Options {
+	managedBySelector := labels.SelectorFromSet(labels.Set{
+		"app.kubernetes.io/managed-by": "ogx-operator",
+	})
+	managedByFilter := cache.ByObject{Label: managedBySelector}
+
+	return cache.Options{
+		DefaultTransform: cache.TransformStripManagedFields(),
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.ConfigMap{}: {
+				Label: labels.SelectorFromSet(labels.Set{
+					controllers.WatchLabelKey: controllers.WatchLabelValue,
+				}),
+			},
+			&appsv1.Deployment{}:                     managedByFilter,
+			&policyv1.PodDisruptionBudget{}:          managedByFilter,
+			&autoscalingv2.HorizontalPodAutoscaler{}: managedByFilter,
+			&corev1.Service{}:                        managedByFilter,
+			&networkingv1.NetworkPolicy{}:            managedByFilter,
+			&networkingv1.Ingress{}:                  managedByFilter,
+			&corev1.PersistentVolumeClaim{}:          managedByFilter,
+		},
+	}
 }
 
 func setupHealthChecks(mgr ctrl.Manager) error {
@@ -104,9 +144,10 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                     scheme,
 		Metrics:                    metricsserver.Options{BindAddress: metricsAddr},
+		Cache:                      newCacheOptions(),
 		HealthProbeBindAddress:     probeAddr,
 		LeaderElection:             enableLeaderElection,
-		LeaderElectionID:           "54e06e98.llamastack.io",
+		LeaderElectionID:           "54e06e98.ogx.io",
 		LeaderElectionResourceLock: "leases",
 		LeaderElectionNamespace:    "",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
@@ -152,7 +193,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := setupReconciler(ctx, setupClient, mgr, clusterInfo); err != nil {
+	if err := setupWebhook(mgr, clusterInfo); err != nil {
+		setupLog.Error(err, "failed to set up webhook")
+		os.Exit(1)
+	}
+
+	if err := setupReconciler(ctx, setupClient, mgr, clusterInfo, setupClient); err != nil {
 		setupLog.Error(err, "failed to set up reconciler")
 		os.Exit(1)
 	}

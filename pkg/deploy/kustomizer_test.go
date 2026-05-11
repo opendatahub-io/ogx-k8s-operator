@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	llamav1alpha1 "github.com/llamastack/llama-stack-k8s-operator/api/v1alpha1"
-	"github.com/llamastack/llama-stack-k8s-operator/pkg/deploy/plugins"
+	ogxiov1beta1 "github.com/ogx-ai/ogx-k8s-operator/api/v1beta1"
+	"github.com/ogx-ai/ogx-k8s-operator/pkg/deploy/plugins"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,7 +28,7 @@ import (
 
 const manifestBasePath = "manifests/base"
 
-func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, string, *llamav1alpha1.LlamaStackDistribution) {
+func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, string, *ogxiov1beta1.OGXServer) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second) // to avlid client rate limit due to too many test in parallel
@@ -42,10 +42,10 @@ func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, s
 		require.NoError(t, k8sClient.Delete(context.Background(), ns))
 	})
 
-	owner := &llamav1alpha1.LlamaStackDistribution{
+	owner := &ogxiov1beta1.OGXServer{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "llamastack.io/v1alpha1",
-			Kind:       "LlamaStackDistribution",
+			APIVersion: "ogx.io/v1beta1",
+			Kind:       "OGXServer",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ownerName,
@@ -57,7 +57,7 @@ func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, s
 	require.NoError(t, k8sClient.Create(ctx, owner))
 	require.NotEmpty(t, owner.UID)
 
-	createdOwner := &llamav1alpha1.LlamaStackDistribution{}
+	createdOwner := &ogxiov1beta1.OGXServer{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: owner.Namespace}, createdOwner))
 	createdOwner.SetGroupVersionKind(ownerGVK)
 
@@ -95,12 +95,14 @@ spec:
 
 		// given an owner with an empty spec to verify that the default value logic
 		// in the field transformer plugin is correctly triggered
-		owner := &llamav1alpha1.LlamaStackDistribution{
+		owner := &ogxiov1beta1.OGXServer{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-instance",
 				Namespace: "test-render-ns",
 			},
-			Spec: llamav1alpha1.LlamaStackDistributionSpec{},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+			},
 		}
 
 		// when we call RenderManifest
@@ -145,7 +147,7 @@ metadata:
   name: deployment`
 		require.NoError(t, fsys.WriteFile(filepath.Join(defaultPath, "deployment.yaml"), []byte(deploymentContent)))
 
-		owner := &llamav1alpha1.LlamaStackDistribution{
+		owner := &ogxiov1beta1.OGXServer{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-instance",
 				Namespace: "test-fallback-ns",
@@ -177,7 +179,7 @@ resources:
 `
 		require.NoError(t, fsys.WriteFile(filepath.Join(manifestBasePath, "kustomization.yaml"), []byte(kustomizationContent)))
 
-		owner := &llamav1alpha1.LlamaStackDistribution{
+		owner := &ogxiov1beta1.OGXServer{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-instance",
 				Namespace: "test-error-ns",
@@ -310,10 +312,10 @@ func TestApplyResources(t *testing.T) {
 		// given
 		ctx, testNs, owner := setupApplyResourcesTest(t, "does-not-steal-owner")
 
-		ownerOther := &llamav1alpha1.LlamaStackDistribution{
+		ownerOther := &ogxiov1beta1.OGXServer{
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: "llamastack.io/v1alpha1",
-				Kind:       "LlamaStackDistribution",
+				APIVersion: "ogx.io/v1beta1",
+				Kind:       "OGXServer",
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-owner-other",
@@ -322,9 +324,9 @@ func TestApplyResources(t *testing.T) {
 		}
 		require.NoError(t, k8sClient.Create(ctx, ownerOther))
 
-		createdOwnerOther := &llamav1alpha1.LlamaStackDistribution{}
+		createdOwnerOther := &ogxiov1beta1.OGXServer{}
 		require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(ownerOther), createdOwnerOther))
-		createdOwnerOther.SetGroupVersionKind(llamav1alpha1.GroupVersion.WithKind("LlamaStackDistribution"))
+		createdOwnerOther.SetGroupVersionKind(ogxiov1beta1.GroupVersion.WithKind("OGXServer"))
 
 		existingSvc := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
@@ -539,13 +541,9 @@ func TestFilterExcludeKinds(t *testing.T) {
 func TestSetDefaultPort(t *testing.T) {
 	// arrange
 	// instance with no custom port and service with empty port values
-	instance := &llamav1alpha1.LlamaStackDistribution{
-		Spec: llamav1alpha1.LlamaStackDistributionSpec{
-			Server: llamav1alpha1.ServerSpec{
-				ContainerSpec: llamav1alpha1.ContainerSpec{
-					Port: 0, // no port configured
-				},
-			},
+	instance := &ogxiov1beta1.OGXServer{
+		Spec: ogxiov1beta1.OGXServerSpec{
+			Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
 		},
 	}
 
@@ -559,7 +557,7 @@ func TestSetDefaultPort(t *testing.T) {
 		Mappings: []plugins.FieldMapping{
 			{
 				SourceValue:       getServicePort(instance), // tests getServicePort() integration with kustomizer
-				DefaultValue:      llamav1alpha1.DefaultServerPort,
+				DefaultValue:      ogxiov1beta1.DefaultServerPort,
 				TargetField:       "/spec/ports/0/port",
 				TargetKind:        "Service",
 				CreateIfNotExists: true,
@@ -583,20 +581,21 @@ func TestSetDefaultPort(t *testing.T) {
 	require.True(t, ok)
 	actualPort, ok := ports[0].(map[string]any)["port"]
 	require.True(t, ok)
-	require.Equal(t, int(llamav1alpha1.DefaultServerPort), actualPort)
+	require.Equal(t, int(ogxiov1beta1.DefaultServerPort), actualPort)
 }
 
 func TestRemoveDeploymentReplicas(t *testing.T) {
 	t.Parallel()
 
-	instance := &llamav1alpha1.LlamaStackDistribution{
+	instance := &ogxiov1beta1.OGXServer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "example",
 			Namespace: "llama",
 		},
-		Spec: llamav1alpha1.LlamaStackDistributionSpec{
-			Server: llamav1alpha1.ServerSpec{
-				Autoscaling: &llamav1alpha1.AutoscalingSpec{
+		Spec: ogxiov1beta1.OGXServerSpec{
+			Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+			Workload: &ogxiov1beta1.WorkloadSpec{
+				Autoscaling: &ogxiov1beta1.AutoscalingSpec{
 					MaxReplicas: 5,
 				},
 			},
@@ -738,6 +737,166 @@ func TestHasLegacyCABundleVolumes(t *testing.T) {
 		result := hasLegacyCABundleVolumes(ctx, u)
 		require.False(t, result, "should return false when no volumes present")
 	})
+}
+
+// TestHasStaleUserConfigVolume tests detection of a stale user-config volume
+// (present in existing Deployment but absent from desired).
+func TestHasStaleUserConfigVolume(t *testing.T) {
+	makeDeployment := func(volumes ...corev1.Volume) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			Spec: appsv1.DeploymentSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Volumes: volumes},
+				},
+			},
+		}
+	}
+
+	userConfigVol := corev1.Volume{
+		Name: "user-config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "my-config"},
+			},
+		},
+	}
+	storageVol := corev1.Volume{
+		Name:         "lls-storage",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+
+	t.Run("returns true when existing has user-config and desired does not", func(t *testing.T) {
+		existing := makeDeployment(storageVol, userConfigVol)
+		desired := makeDeployment(storageVol)
+		require.True(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when both existing and desired have user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol, userConfigVol)
+		desired := makeDeployment(storageVol, userConfigVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when neither has user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol)
+		desired := makeDeployment(storageVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when only desired has user-config", func(t *testing.T) {
+		existing := makeDeployment(storageVol)
+		desired := makeDeployment(storageVol, userConfigVol)
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+
+	t.Run("returns false when no volumes present in either", func(t *testing.T) {
+		existing := makeDeployment()
+		desired := makeDeployment()
+		require.False(t, hasStaleUserConfigVolume(desired, existing))
+	})
+}
+
+// TestUserConfigVolumeRemoval tests that removing spec.server.userConfig from the LLSD
+// causes the "user-config" volume to be removed from the Deployment.
+func TestUserConfigVolumeRemoval(t *testing.T) {
+	ctx, testNs, owner := setupApplyResourcesTest(t, "userconfig-removal")
+
+	// Create an existing Deployment that has a user-config volume (simulates operator
+	// creating the Deployment via cli.Create when userConfig was set, without SSA
+	// field manager tracking).
+	existingDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-deployment",
+			Namespace: testNs,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(owner, owner.GroupVersionKind()),
+			},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "test"},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": "test"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "test:v1"},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "lls-storage",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						// This volume was set when userConfig was configured;
+						// it should be removed when userConfig is cleared.
+						{
+							Name: "user-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: "my-llama-config",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	require.NoError(t, k8sClient.Create(ctx, existingDeployment))
+
+	// Desired Deployment reflects the LLSD after userConfig has been removed —
+	// only the storage volume remains.
+	desiredDeployment := newTestResource(t, "apps/v1", "Deployment", "test-deployment", testNs, map[string]any{
+		"replicas": int32(1),
+		"selector": map[string]any{
+			"matchLabels": map[string]any{"app": "test"},
+		},
+		"template": map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{"app": "test"},
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "main", "image": "test:v2"},
+				},
+				"volumes": []any{
+					map[string]any{
+						"name":     "lls-storage",
+						"emptyDir": map[string]any{},
+					},
+				},
+			},
+		},
+	})
+
+	resMap := resmap.New()
+	require.NoError(t, resMap.Append(desiredDeployment))
+
+	require.NoError(t, ApplyResources(ctx, k8sClient, scheme.Scheme, owner, &resMap))
+
+	updated := &appsv1.Deployment{}
+	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: "test-deployment", Namespace: testNs}, updated))
+
+	// Verify the user-config volume was removed.
+	for _, vol := range updated.Spec.Template.Spec.Volumes {
+		require.NotEqual(t, "user-config", vol.Name, "stale user-config volume should have been removed from the Deployment")
+	}
+	// Verify the storage volume still exists.
+	found := false
+	for _, vol := range updated.Spec.Template.Spec.Volumes {
+		if vol.Name == "lls-storage" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "lls-storage volume should still be present")
 }
 
 // TestLegacyCABundleUpgrade tests that deployments with legacy CA bundle volumes
@@ -889,6 +1048,57 @@ func TestLegacyCABundleUpgrade(t *testing.T) {
 	require.Empty(t, updatedDeployment.Spec.Template.Spec.InitContainers, "legacy init containers should be removed")
 }
 
+// ptr is a helper function to get a pointer to a value.
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func TestGetFieldMappings_RecreateStrategyWithStorage(t *testing.T) {
+	t.Run("includes Recreate strategy when storage is configured", func(t *testing.T) {
+		owner := &ogxiov1beta1.OGXServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+				Workload: &ogxiov1beta1.WorkloadSpec{
+					Replicas: ptr(int32(1)),
+					Storage:  &ogxiov1beta1.PVCStorageSpec{},
+				},
+			},
+		}
+
+		mappings := getFieldMappings(owner)
+
+		var found bool
+		for _, m := range mappings {
+			if m.TargetField == "/spec/strategy/type" && m.TargetKind == "Deployment" {
+				assert.Equal(t, "Recreate", m.SourceValue)
+				assert.True(t, m.CreateIfNotExists)
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "should include Recreate strategy mapping when storage is configured")
+	})
+
+	t.Run("does not include strategy when storage is nil", func(t *testing.T) {
+		owner := &ogxiov1beta1.OGXServer{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+				Workload:     &ogxiov1beta1.WorkloadSpec{Replicas: ptr(int32(1))},
+			},
+		}
+
+		mappings := getFieldMappings(owner)
+
+		for _, m := range mappings {
+			if m.TargetField == "/spec/strategy/type" {
+				t.Fatal("should not include strategy mapping when storage is nil")
+			}
+		}
+	})
+}
+
 // resourceToUnstructured converts a kustomize resource to an unstructured object.
 func resourceToUnstructured(t *testing.T, res *kresource.Resource) (*unstructured.Unstructured, error) {
 	t.Helper()
@@ -904,9 +1114,4 @@ func resourceToUnstructured(t *testing.T, res *kresource.Resource) (*unstructure
 	}
 
 	return u, nil
-}
-
-// ptr is a helper function to get a pointer to a value.
-func ptr[T any](v T) *T {
-	return &v
 }

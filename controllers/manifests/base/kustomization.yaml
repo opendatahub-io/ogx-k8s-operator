@@ -14,5 +14,6 @@ resources:
 labels:
 - includeSelectors: false
   pairs:
-    app.kubernetes.io/managed-by: llama-stack-operator
-    app.kubernetes.io/part-of: llama-stack
+    app.kubernetes.io/managed-by: ogx-operator
+    app.kubernetes.io/part-of: ogx
+    ogx.io/watch: "true"
