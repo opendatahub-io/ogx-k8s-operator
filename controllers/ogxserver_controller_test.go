@@ -954,6 +954,7 @@ func TestConfigMapUpdateTriggersReconciliation(t *testing.T) {
 		Name:      configMap.Name,
 		Namespace: configMap.Namespace,
 	}, configMap))
+
 	// Update ConfigMap with new overrides
 	if configMap.Data == nil {
 		configMap.Data = make(map[string]string)
