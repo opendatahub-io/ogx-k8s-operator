@@ -6915,6 +6915,8 @@ spec:
           value: 800MiB
         - name: OPERATOR_VERSION
           value: latest
+        - name: RELATED_IMAGE_RH_DISTRIBUTION
+          value: ""
         image: quay.io/ogx-ai/ogx-k8s-operator:latest
         imagePullPolicy: Always
         livenessProbe:

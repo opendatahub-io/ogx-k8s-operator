@@ -6914,13 +6914,9 @@ spec:
           value: 800MiB
         - name: OPERATOR_VERSION
           value: latest
-<<<<<<< HEAD
         - name: RELATED_IMAGE_RH_DISTRIBUTION
           value: ""
-        image: quay.io/llamastack/llama-stack-k8s-operator:latest
-=======
         image: quay.io/ogx-ai/ogx-k8s-operator:latest
->>>>>>> bffae1f (feat(api): Add OGXServer CRD types and renamed operator references (#289))
         imagePullPolicy: Always
         livenessProbe:
           httpGet:

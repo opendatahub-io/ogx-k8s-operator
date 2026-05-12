@@ -51,6 +51,11 @@ func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, s
 			Name:      ownerName,
 			Namespace: testNs,
 		},
+		Spec: ogxiov1beta1.OGXServerSpec{
+			Distribution: ogxiov1beta1.DistributionSpec{
+				Image: "test-image:latest",
+			},
+		},
 	}
 	ownerGVK := owner.GroupVersionKind()
 
@@ -320,6 +325,11 @@ func TestApplyResources(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-owner-other",
 				Namespace: testNs,
+			},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{
+					Image: "test-image:latest",
+				},
 			},
 		}
 		require.NoError(t, k8sClient.Create(ctx, ownerOther))
