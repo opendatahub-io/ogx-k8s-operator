@@ -28,5 +28,5 @@ jobs:
           username: ${{ secrets.APP_QUAY_USERNAME }}
           password: ${{ secrets.APP_QUAY_TOKEN }}
 
-      - name: Build and push latest image
-        run: make image-build image-push -e IMG=quay.io/opendatahub/llama-stack-k8s-operator:latest
+      - name: Build and push odh image
+        run: make image-build image-push -e IMG=quay.io/opendatahub/odh-ogx-k8s-operator:odh

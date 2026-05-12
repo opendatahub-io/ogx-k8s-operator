@@ -33,7 +33,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Create kind config
         run: |
@@ -75,29 +75,29 @@ jobs:
       - name: Build operator image
         run: |
           # Build the image with run-based tag for uniqueness
-          docker build -t kind-registry:5000/llama-stack-k8s-operator:run-${{ github.run_id }} -f Dockerfile .
+          docker build -t kind-registry:5000/ogx-k8s-operator:run-${{ github.run_id }} -f Dockerfile .
 
           # Tag the image for local registry
-          docker tag kind-registry:5000/llama-stack-k8s-operator:run-${{ github.run_id }} kind-registry:5000/llama-stack-k8s-operator:latest
+          docker tag kind-registry:5000/ogx-k8s-operator:run-${{ github.run_id }} kind-registry:5000/ogx-k8s-operator:latest
 
       - name: Push operator image to local registry
         run: |
           echo '{"insecure-registries": ["kind-registry:5000"]}' | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
           until docker exec kind-registry true 2>/dev/null; do sleep 1; done
-          docker push kind-registry:5000/llama-stack-k8s-operator:latest
+          docker push kind-registry:5000/ogx-k8s-operator:latest
 
       - name: Deploy operator
         run: |
           # Deploy the operator
-          make deploy IMG=kind-registry:5000/llama-stack-k8s-operator:latest
+          make deploy IMG=kind-registry:5000/ogx-k8s-operator:latest
 
           # Wait for operator deployment to be ready
-          if ! kubectl wait --for=condition=available --timeout=300s deployment/llama-stack-k8s-operator-controller-manager -n llama-stack-k8s-operator-system; then
+          if ! kubectl wait --for=condition=available --timeout=300s deployment/ogx-k8s-operator-controller-manager -n ogx-k8s-operator-system; then
             echo "Deployment failed to become ready. Debugging information:"
-            kubectl describe deployment llama-stack-k8s-operator-controller-manager -n llama-stack-k8s-operator-system
-            kubectl logs -l control-plane=controller-manager -n llama-stack-k8s-operator-system --tail=100
-            kubectl get events -n llama-stack-k8s-operator-system --sort-by='.lastTimestamp'
+            kubectl describe deployment ogx-k8s-operator-controller-manager -n ogx-k8s-operator-system
+            kubectl logs -l control-plane=controller-manager -n ogx-k8s-operator-system --tail=100
+            kubectl get events -n ogx-k8s-operator-system --sort-by='.lastTimestamp'
             exit 1
           fi
 
@@ -120,15 +120,15 @@ jobs:
       - name: Get logs
         if: ${{ always() }}
         run: |
-          kubectl -n llama-stack-test get all -o yaml > all.log
-          kubectl -n llama-stack-k8s-operator-system logs deployment.apps/llama-stack-k8s-operator-controller-manager > controller-manager.log
-          kubectl -n llama-stack-test describe all > all-describe.log
-          kubectl -n llama-stack-test describe events > events.log
-          kubectl get llamastackdistributions --all-namespaces -o yaml > llamastackdistributions.log
+          kubectl -n ogx-test get all -o yaml > all.log
+          kubectl -n ogx-k8s-operator-system logs deployment.apps/ogx-k8s-operator-controller-manager > controller-manager.log
+          kubectl -n ogx-test describe all > all-describe.log
+          kubectl -n ogx-test describe events > events.log
+          kubectl get ogxservers --all-namespaces -o yaml > ogxservers.log
 
       - name: Upload all logs to artifacts
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: logs-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

@@ -4,7 +4,7 @@ kind: Kustomization
 namespace: redhat-ods-applications
 
 resources:
-  - ../../default
+  - ../openshift
 
 patches:
   # patch to remove default `system` namespace in ../../manager/manager.yaml
@@ -19,7 +19,7 @@ replacements:
   - source:
       kind: ConfigMap
       name: params
-      fieldPath: data.RELATED_IMAGE_ODH_LLAMASTACK_OPERATOR
+      fieldPath: data.RELATED_IMAGE_ODH_OGX_OPERATOR
     targets:
       - select:
           kind: Deployment
