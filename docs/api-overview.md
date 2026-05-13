@@ -808,7 +808,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `distribution` _[DistributionSpec](#distributionspec)_ | Distribution identifies the OGX distribution to deploy. |  | Required: \{\} <br /> |
 | `providers` _[ProvidersSpec](#providersspec)_ | Providers configures providers by API type.<br />Mutually exclusive with overrideConfig. |  |  |
-| `resources` _[ResourcesSpec](#resourcesspec)_ | Resources declares models, tools, and shields to register.<br />Mutually exclusive with overrideConfig. |  |  |
+| `resources` _[ResourcesSpec](#resourcesspec)_ | Resources declares models and tools to register.<br />Mutually exclusive with overrideConfig. |  |  |
 | `storage` _[StateStorageSpec](#statestoragespec)_ | Storage configures state storage backends (KV and SQL).<br />Mutually exclusive with overrideConfig. |  |  |
 | `disabledAPIs` _string array_ | DisabledAPIs lists API names to remove from the generated config.<br />Mutually exclusive with overrideConfig. |  | MaxItems: 6 <br />MinItems: 1 <br />items:Enum: [batches inference responses tool_runtime vector_io files] <br /> |
 | `network` _[NetworkSpec](#networkspec)_ | Network defines network access controls. |  |  |
@@ -1019,7 +1019,7 @@ _Appears in:_
 
 #### ResourcesSpec
 
-ResourcesSpec defines declarative registration of models, tools, and shields.
+ResourcesSpec defines declarative registration of models and tools.
 
 _Appears in:_
 - [OGXServerSpec](#ogxserverspec)
@@ -1028,7 +1028,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `models` _[ModelConfig](#modelconfig) array_ | Models to register with inference providers. |  | MinItems: 1 <br /> |
 | `tools` _string array_ | Tools are tool group names to register with the toolRuntime provider. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
-| `shields` _string array_ | Shields to register by name. |  | MinItems: 1 <br />items:MinLength: 1 <br /> |
 
 #### ResponsesInlineProviders
 

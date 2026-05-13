@@ -3553,7 +3553,7 @@ spec:
                 type: object
               resources:
                 description: |-
-                  Resources declares models, tools, and shields to register.
+                  Resources declares models and tools to register.
                   Mutually exclusive with overrideConfig.
                 properties:
                   models:
@@ -3591,13 +3591,6 @@ spec:
                       - message: quantization must not be empty if specified
                         rule: '!has(self.quantization) || self.quantization.size()
                           > 0'
-                    minItems: 1
-                    type: array
-                  shields:
-                    description: Shields to register by name.
-                    items:
-                      minLength: 1
-                      type: string
                     minItems: 1
                     type: array
                   tools:
