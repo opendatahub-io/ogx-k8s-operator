@@ -53,7 +53,7 @@ func setupApplyResourcesTest(t *testing.T, ownerName string) (context.Context, s
 		},
 		Spec: ogxiov1beta1.OGXServerSpec{
 			Distribution: ogxiov1beta1.DistributionSpec{
-				Image: "test-image:latest",
+				Name: "starter",
 			},
 		},
 	}
@@ -328,7 +328,7 @@ func TestApplyResources(t *testing.T) {
 			},
 			Spec: ogxiov1beta1.OGXServerSpec{
 				Distribution: ogxiov1beta1.DistributionSpec{
-					Image: "test-image:latest",
+					Name: "starter",
 				},
 			},
 		}
