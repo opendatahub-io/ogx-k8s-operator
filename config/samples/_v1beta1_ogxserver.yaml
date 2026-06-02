@@ -31,3 +31,6 @@ spec:
       maxReplicas: 5
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 70
+  # monitoring:
+  #   enabled: true
+  #   metricsPort: 9090

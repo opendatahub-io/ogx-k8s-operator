@@ -709,6 +709,18 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `id` _string_ | ID is a unique provider identifier. Derived from the provider<br />type when omitted. Must be unique across all providers. |  |  |
 
+#### MonitoringSpec
+
+MonitoringSpec configures Prometheus monitoring for this OGXServer instance.
+
+_Appears in:_
+- [OGXServerSpec](#ogxserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled controls whether the operator creates monitoring resources<br />(ServiceMonitor, PrometheusRule) for this server.<br />Defaults to true. Set to false to disable monitoring without removing the config. | true |  |
+| `metricsPort` _integer_ | MetricsPort is the port serving the /metrics endpoint.<br />When omitted, metrics are served on the main API port. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+
 #### NetworkPolicySpec
 
 NetworkPolicySpec configures the operator-managed NetworkPolicy for this server.
@@ -815,6 +827,7 @@ _Appears in:_
 | `network` _[NetworkSpec](#networkspec)_ | Network defines network access controls. |  |  |
 | `tls` _[TLSClientConfig](#tlsclientconfig)_ | TLS configures outbound TLS trust anchors and client identity for<br />connections to providers and backends. |  |  |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload consolidates Kubernetes deployment settings. |  |  |
+| `monitoring` _[MonitoringSpec](#monitoringspec)_ | Monitoring configures Prometheus monitoring and observability. |  |  |
 | `overrideConfig` _[ConfigMapKeyRef](#configmapkeyref)_ | OverrideConfig references a ConfigMap key containing a full config.yaml override.<br />Mutually exclusive with providers, resources, storage, and disabledAPIs.<br />The ConfigMap must be in the same namespace as the OGXServer<br />and must have the label ogx.io/watch: "true". |  |  |
 
 #### OGXServerStatus

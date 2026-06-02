@@ -45,6 +45,8 @@ const (
 	DefaultMountPath = "/.ogx"
 	// OGXServerKind is the kind name for OGXServer resources.
 	OGXServerKind = "OGXServer"
+	// DefaultMetricsPortName is the port name used when a dedicated metrics port is configured.
+	DefaultMetricsPortName = "metrics"
 
 	// AdoptStorageAnnotation triggers PVC adoption from a legacy LlamaStackDistribution.
 	AdoptStorageAnnotation = "ogx.io/adopt-storage"
@@ -316,6 +318,22 @@ type NetworkSpec struct {
 	Policy *NetworkPolicySpec `json:"policy,omitempty"`
 }
 
+// MonitoringSpec configures Prometheus monitoring for this OGXServer instance.
+type MonitoringSpec struct {
+	// Enabled controls whether the operator creates monitoring resources
+	// (ServiceMonitor, PrometheusRule) for this server.
+	// Defaults to true. Set to false to disable monitoring without removing the config.
+	// +optional
+	// +kubebuilder:default:=true
+	Enabled *bool `json:"enabled,omitempty"`
+	// MetricsPort is the port serving the /metrics endpoint.
+	// When omitted, metrics are served on the main API port.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	MetricsPort *int32 `json:"metricsPort,omitempty"`
+}
+
 // PVCStorageSpec defines PVC storage for persistent data.
 // +kubebuilder:validation:XValidation:rule="!has(self.mountPath) || self.mountPath.size() > 0",message="mountPath must not be empty if specified"
 // +kubebuilder:validation:XValidation:rule="!has(self.size) || quantity(self.size).isGreaterThan(quantity('0'))",message="size must be a positive quantity"
@@ -478,6 +496,9 @@ type OGXServerSpec struct {
 	// Workload consolidates Kubernetes deployment settings.
 	// +optional
 	Workload *WorkloadSpec `json:"workload,omitempty"`
+	// Monitoring configures Prometheus monitoring and observability.
+	// +optional
+	Monitoring *MonitoringSpec `json:"monitoring,omitempty"`
 	// OverrideConfig references a ConfigMap key containing a full config.yaml override.
 	// Mutually exclusive with providers, resources, storage, and disabledAPIs.
 	// The ConfigMap must be in the same namespace as the OGXServer
