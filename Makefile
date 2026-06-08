@@ -112,11 +112,11 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./api/...;./controllers/..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
-	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
 
 GOLANGCI_TMP_FILE = .golangci.mktmp.yml
 
@@ -428,7 +428,7 @@ endif
 API_DOCS_PATH = ./docs/api-overview.md
 api-docs: crd-ref-docs ## Creates API docs using https://github.com/elastic/crd-ref-docs
 	mkdir -p docs
-	$(CRD_REF_DOCS) --source-path ./ --output-path $(API_DOCS_PATH) --renderer markdown --config ./crd-ref-docs.config.yaml
+	$(CRD_REF_DOCS) --source-path ./api --output-path $(API_DOCS_PATH) --renderer markdown --config ./crd-ref-docs.config.yaml
 	@# Combined command to remove .io links, ensure a trailing newline, and collapse multiple blank lines.
 	@sed -i.bak -e  '/^$$/N;/^\n$$/D' $(API_DOCS_PATH)
 	@# BSD sed doesn't generate trailing newlines, so no need to remove them.
