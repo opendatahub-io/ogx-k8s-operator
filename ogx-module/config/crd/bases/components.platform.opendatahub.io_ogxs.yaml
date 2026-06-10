@@ -56,6 +56,16 @@ spec:
               The full module-facing spec surface is added in later tasks. This initial scaffold
               preserves the ODH-facing kind/GVK and status contract without guessing operand-level
               configuration prematurely.
+            properties:
+              managementState:
+                default: Managed
+                description: |-
+                  ManagementState controls whether the operator actively manages the
+                  component (Managed) or removes it (Removed).
+                enum:
+                - Managed
+                - Removed
+                type: string
             type: object
           status:
             description: OGXStatus defines the observed state of OGX.
