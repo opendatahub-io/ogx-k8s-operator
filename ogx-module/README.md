@@ -113,6 +113,110 @@ This gives OGX an ODH-native module path with its own API, controller, and
 packaging lifecycle, instead of mixing ODH module behavior into the standalone
 root operator entrypoint.
 
+## Build the image
+
+The module operator image is built from the repository root using the module
+Dockerfile:
+
+```bash
+docker build -f ogx-module/Dockerfile -t quay.io/<user>/odh-ogx-module-operator:dev .
+```
+
+During the build:
+
+1. the `ogx-module` manager binary is compiled
+2. the module `hack/get_manifests.sh` script stages the root OGX operator
+   manifests into `ogx-module/config/manifests/ogx`
+3. those staged manifests are baked into the final image under `/manifests`
+
+This means the module operator image contains both:
+
+- the `ogx-module` controller binary
+- the root `ogx-k8s-operator` manifests that the controller will render and deploy
+
+## Deploy the `ogx-module` operator
+
+The module operator bootstrap manifests live under `ogx-module/config/`.
+The default kustomization deploys:
+
+- the `OGX` CRD
+- RBAC for the module controller
+- the module controller `Deployment`
+- the module controller `ConfigMap`
+
+You can render or apply the default bundle with:
+
+```bash
+kustomize build ogx-module/config/default
+```
+
+or:
+
+```bash
+kustomize build ogx-module/config/default | kubectl apply -f -
+```
+
+The default bundle deploys the module operator into the
+`opendatahub-ogx-system` namespace.
+
+The module controller `Deployment` also carries the environment variables used
+by the module runtime:
+
+- `ODH_MODULE_OPERATOR_CONFIGURATION_PATH`
+- `ODH_MODULE_OPERATOR_MANIFESTS_PATH`
+- `APPLICATIONS_NAMESPACE`
+- `RELATED_IMAGE_ODH_OGX_OPERATOR`
+- `RELATED_IMAGE_RH_DISTRIBUTION`
+
+## Create the `OGX` custom resource
+
+Once the module operator is running, create the singleton `OGX` resource:
+
+```yaml
+apiVersion: components.platform.opendatahub.io/v1alpha1
+kind: OGX
+metadata:
+  name: default-ogx
+spec:
+  managementState: Managed
+```
+
+Apply it with:
+
+```bash
+kubectl apply -f ogx-module.yaml
+```
+
+## How the `OGX` CR deploys the root operator
+
+The `OGX` resource is the trigger for the module controller.
+
+When the module controller reconciles `default-ogx`, it:
+
+1. reads the selected platform settings and image overrides
+2. renders the staged root `ogx-k8s-operator` manifests from `/manifests/ogx`
+3. applies those manifests with server-side apply
+4. waits for the root OGX operator `Deployment` and webhook resources to become ready
+5. updates the `OGX` status conditions and release metadata
+
+So the module operator does **not** directly create `OGXServer` instances.
+Instead:
+
+- `OGX` deploys the root `ogx-k8s-operator`
+- the root `ogx-k8s-operator` continues to reconcile `OGXServer`
+- module status is reported back through the cluster-scoped `OGX` CR
+
+## Example lifecycle
+
+```text
+1. Deploy ogx-module operator
+2. Create default-ogx
+3. ogx-module renders and deploys root ogx-k8s-operator manifests
+4. root ogx-k8s-operator becomes ready
+5. root operator manages OGXServer resources
+6. OGX status reflects provisioning, readiness, degradation, and releases
+```
+
 ## Directory layout
 
 ```text
