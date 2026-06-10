@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"gopkg.in/yaml.v3"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -243,7 +244,7 @@ func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured,
 	if hasImageParamOverrides() {
 		renderFS, renderPath, err := prepareManifestFSWithOverrides(componentRoot, overlay)
 		if err != nil {
-			return nil, fmt.Errorf("preparing manifest filesystem with image overrides: %w", err)
+			return nil, fmt.Errorf("failed to prepare manifest filesystem with image overrides: %w", err)
 		}
 
 		engineOpts = append(engineOpts, odhkustomize.WithEngineFS(renderFS))
@@ -256,7 +257,7 @@ func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured,
 		odhkustomize.WithNamespace(r.Config.ApplicationsNamespace),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("rendering root operator manifests from %s: %w", overlayPath, err)
+		return nil, fmt.Errorf("failed to render root operator manifests from %s: %w", overlayPath, err)
 	}
 
 	filtered := make([]unstructured.Unstructured, 0, len(rendered))
@@ -279,7 +280,7 @@ func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured,
 
 func (r *Reconciler) cleanupRootOperatorResources(ctx context.Context, instance *platformv1alpha1.OGX) error {
 	if r.GarbageCollector == nil {
-		return fmt.Errorf("garbage collector is not configured")
+		return fmt.Errorf("failed to run cleanup because garbage collector is not configured")
 	}
 
 	return r.GarbageCollector.Run(ctx, odhgc.RunParams{
@@ -305,7 +306,7 @@ func (r *Reconciler) rootDeploymentsReady(ctx context.Context, resources []unstr
 	for i := range deployments {
 		deployment := &appsv1.Deployment{}
 		if err := r.Get(ctx, deployments[i], deployment); err != nil {
-			return false, fmt.Errorf("getting deployment %s: %w", deployments[i].String(), err)
+			return false, fmt.Errorf("failed to get deployment %s: %w", deployments[i].String(), err)
 		}
 
 		if deployment.Generation > deployment.Status.ObservedGeneration {
@@ -352,7 +353,7 @@ func (r *Reconciler) rootWebhookResourcesReady(ctx context.Context, resources []
 			case apierrors.IsNotFound(err):
 				return false, nil
 			default:
-				return false, fmt.Errorf("getting validating webhook configuration %s: %w", name, err)
+				return false, fmt.Errorf("failed to get validating webhook configuration %s: %w", name, err)
 			}
 		}
 
@@ -371,7 +372,7 @@ func (r *Reconciler) rootWebhookResourcesReady(ctx context.Context, resources []
 				case apierrors.IsNotFound(err):
 					return false, nil
 				default:
-					return false, fmt.Errorf("getting webhook service %s: %w", serviceKey.String(), err)
+					return false, fmt.Errorf("failed to get webhook service %s: %w", serviceKey.String(), err)
 				}
 			}
 		}
@@ -384,7 +385,7 @@ func (r *Reconciler) rootWebhookResourcesReady(ctx context.Context, resources []
 			case apierrors.IsNotFound(err):
 				return false, nil
 			default:
-				return false, fmt.Errorf("getting webhook secret %s: %w", secretKey.String(), err)
+				return false, fmt.Errorf("failed to get webhook secret %s: %w", secretKey.String(), err)
 			}
 		}
 	}
@@ -438,7 +439,7 @@ func (r *Reconciler) aggregateOGXServerHealth(ctx context.Context) (ogxServerHea
 		case apimeta.IsNoMatchError(err), apierrors.IsNotFound(err):
 			return ogxServerHealthSummary{}, nil
 		default:
-			return ogxServerHealthSummary{}, fmt.Errorf("listing OGXServer instances: %w", err)
+			return ogxServerHealthSummary{}, fmt.Errorf("failed to list OGXServer instances: %w", err)
 		}
 	}
 
@@ -460,7 +461,7 @@ func (r *Reconciler) aggregateOGXServerHealth(ctx context.Context) (ogxServerHea
 func ogxServerIsHealthy(obj *unstructured.Unstructured) bool {
 	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
-		return true
+		return false
 	}
 
 	deploymentReadyFalse := hasConditionStatus(conditions, ogxServerDeploymentReady, metav1.ConditionFalse)
@@ -672,12 +673,12 @@ func (r *Reconciler) loadComponentReleases() (common.ComponentReleaseStatus, err
 	path := filepath.Join(r.Config.ManifestsPath, componentName, "component_metadata.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return common.ComponentReleaseStatus{}, fmt.Errorf("reading component metadata %s: %w", path, err)
+		return common.ComponentReleaseStatus{}, fmt.Errorf("failed to read component metadata %s: %w", path, err)
 	}
 
 	meta := componentMetadata{}
 	if err := yaml.Unmarshal(data, &meta); err != nil {
-		return common.ComponentReleaseStatus{}, fmt.Errorf("unmarshaling component metadata %s: %w", path, err)
+		return common.ComponentReleaseStatus{}, fmt.Errorf("failed to unmarshal component metadata %s: %w", path, err)
 	}
 
 	return common.ComponentReleaseStatus{Releases: meta.Releases}, nil
@@ -779,7 +780,7 @@ func applyParamsEnvOverrides(target filesys.FileSystem, paramsPath string) error
 
 	content, err := target.ReadFile(paramsPath)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", paramsPath, err)
+		return fmt.Errorf("failed to read %s: %w", paramsPath, err)
 	}
 
 	lines := strings.Split(string(content), "\n")
@@ -817,10 +818,17 @@ func resolveImageParamOverride(key string) (string, bool) {
 	}
 
 	for _, envName := range envNames {
-		value := os.Getenv(envName)
-		if value != "" {
-			return value, true
+		value := strings.TrimSpace(os.Getenv(envName))
+		if value == "" {
+			continue
 		}
+
+		if _, err := reference.ParseAnyReference(value); err != nil {
+			log.Log.V(1).Info("skipping invalid image override", "env", envName, "error", err)
+			continue
+		}
+
+		return value, true
 	}
 
 	return "", false

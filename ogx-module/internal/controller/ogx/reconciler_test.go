@@ -101,6 +101,12 @@ func TestAggregateOGXServerHealth(t *testing.T) {
 			wantUnhealthy: 1,
 		},
 		{
+			name:          "no conditions is unhealthy",
+			objects:       []runtime.Object{newOGXServerUnstructuredNoConditions("no-conditions", "ns")},
+			wantTotal:     1,
+			wantUnhealthy: 1,
+		},
+		{
 			name:          "mixed health",
 			objects:       []runtime.Object{newOGXServerUnstructured("healthy", "ns-a", condition(ogxServerDeploymentReady, metav1.ConditionTrue), condition(ogxServerHealthCheck, metav1.ConditionTrue)), newOGXServerUnstructured("unhealthy", "ns-b", condition(ogxServerHealthCheck, metav1.ConditionFalse))},
 			wantTotal:     2,
@@ -644,6 +650,92 @@ func condition(conditionType string, status metav1.ConditionStatus) map[string]a
 	return map[string]any{
 		"type":   conditionType,
 		"status": string(status),
+	}
+}
+
+func newOGXServerUnstructuredNoConditions(name, namespace string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": ogxServerGVK.GroupVersion().String(),
+			"kind":       ogxServerGVK.Kind,
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"status": map[string]any{},
+		},
+	}
+	obj.SetGroupVersionKind(ogxServerGVK)
+	return obj
+}
+
+func TestResolveImageParamOverride(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		envVars   map[string]string
+		wantValue string
+		wantOK    bool
+	}{
+		{
+			name:   "unknown key returns false",
+			key:    "UNKNOWN_KEY",
+			wantOK: false,
+		},
+		{
+			name:      "valid image reference",
+			key:       "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "quay.io/opendatahub/odh-ogx-k8s-operator:v1.2.3"},
+			wantValue: "quay.io/opendatahub/odh-ogx-k8s-operator:v1.2.3",
+			wantOK:    true,
+		},
+		{
+			name:      "valid image reference with digest",
+			key:       "RELATED_IMAGE_RH_DISTRIBUTION",
+			envVars:   map[string]string{"RELATED_IMAGE_RH_DISTRIBUTION": "quay.io/opendatahub/ogx-core@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			wantValue: "quay.io/opendatahub/ogx-core@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+			wantOK:    true,
+		},
+		{
+			name:   "empty env returns false",
+			key:    "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			wantOK: false,
+		},
+		{
+			name:    "invalid image reference is rejected",
+			key:     "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "INVALID@@@image::ref"},
+			wantOK:  false,
+		},
+		{
+			name:    "image with newline is rejected",
+			key:     "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "quay.io/repo/img:tag\nmalicious=injected"},
+			wantOK:  false,
+		},
+		{
+			name:      "fallback env var is used",
+			key:       "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": "quay.io/opendatahub/odh-ogx-k8s-operator:v2.0.0"},
+			wantValue: "quay.io/opendatahub/odh-ogx-k8s-operator:v2.0.0",
+			wantOK:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			value, ok := resolveImageParamOverride(tt.key)
+			if ok != tt.wantOK {
+				t.Fatalf("resolveImageParamOverride() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if value != tt.wantValue {
+				t.Fatalf("resolveImageParamOverride() value = %q, want %q", value, tt.wantValue)
+			}
+		})
 	}
 }
 

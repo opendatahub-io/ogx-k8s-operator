@@ -92,17 +92,17 @@ func LoadFromFS(fsys fs.FS) (*Config, error) {
 
 	if fsys != nil {
 		if err := loadFromFS(v, fsys); err != nil {
-			return nil, fmt.Errorf("loading config from filesystem: %w", err)
+			return nil, fmt.Errorf("failed to load config from filesystem: %w", err)
 		}
 	}
 
 	if err := bindEnv(v); err != nil {
-		return nil, fmt.Errorf("binding env vars: %w", err)
+		return nil, fmt.Errorf("failed to bind env vars: %w", err)
 	}
 
 	cfg := &Config{}
 	if err := v.Unmarshal(cfg); err != nil {
-		return nil, fmt.Errorf("unmarshaling config: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
 	return cfg, nil
@@ -134,7 +134,7 @@ func bindEnv(v *viper.Viper) error {
 
 	for _, key := range v.AllKeys() {
 		if err := v.BindEnv(key); err != nil {
-			return fmt.Errorf("binding env for key %s: %w", key, err)
+			return fmt.Errorf("failed to bind env for key %s: %w", key, err)
 		}
 	}
 
@@ -144,7 +144,7 @@ func bindEnv(v *viper.Viper) error {
 func loadFromFS(v *viper.Viper, fsys fs.FS) error {
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
-		return fmt.Errorf("reading config directory: %w", err)
+		return fmt.Errorf("failed to read config directory: %w", err)
 	}
 
 	tmp := viper.New()
@@ -170,7 +170,7 @@ func loadFromFS(v *viper.Viper, fsys fs.FS) error {
 	}
 
 	if err := v.MergeConfigMap(tmp.AllSettings()); err != nil {
-		return fmt.Errorf("merging config from filesystem: %w", err)
+		return fmt.Errorf("failed to merge config from filesystem: %w", err)
 	}
 
 	return nil
@@ -181,11 +181,11 @@ func mergeStructuredFile(v *viper.Viper, name, ext string, data []byte) error {
 	fv.SetConfigType(ext)
 
 	if err := fv.ReadConfig(strings.NewReader(string(data))); err != nil {
-		return fmt.Errorf("parsing config file %s: %w", name, err)
+			return fmt.Errorf("failed to parse config file %s: %w", name, err)
 	}
 
 	if err := v.MergeConfigMap(fv.AllSettings()); err != nil {
-		return fmt.Errorf("merging config from %s: %w", name, err)
+		return fmt.Errorf("failed to merge config from %s: %w", name, err)
 	}
 
 	return nil
