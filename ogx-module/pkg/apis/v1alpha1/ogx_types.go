@@ -31,12 +31,30 @@ type OGXStatus struct {
 	Distribution OGXDistribution `json:"distribution,omitempty"`
 }
 
+func (in *OGXStatus) DeepCopyInto(out *OGXStatus) {
+	*out = *in
+	in.Status.DeepCopyInto(&out.Status)
+	in.ComponentReleaseStatus.DeepCopyInto(&out.ComponentReleaseStatus)
+	out.Distribution = in.Distribution
+}
+
+func (in *OGXStatus) DeepCopy() *OGXStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(OGXStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
 // OGXSpec defines the desired state of OGX.
 //
 // The full module-facing spec surface is added in later tasks. This initial scaffold
 // preserves the ODH-facing kind/GVK and status contract without guessing operand-level
 // configuration prematurely.
-type OGXSpec struct{}
+type OGXSpec struct {
+	common.ManagementSpec `json:",inline"`
+}
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
