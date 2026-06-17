@@ -112,7 +112,7 @@ spec:
       name: llama-stack
       port: 8321
     distribution:
-      name: 'rh-dev'
+      name: 'rh'
     storage:
       size: 20Gi
       mountPath: <custom-mount-path> ## Defaults to /opt/app-root/src/.llama/distributions/rh/
@@ -215,7 +215,7 @@ spec:
     distribution:
       image: <custom-image>
 ```
-**Note**: The default `rh-dev` distribution doesn't support enabling observability for `Dev Preview`. However, you can enable it by modifying `run.yaml` in your custom image as shown in the [observability configuration guide](https://github.com/opendatahub-io/llama-stack-demos/blob/main/kubernetes/observability/run-configuration.md).
+**Note**: The default `rh` distribution doesn't support enabling observability for `Dev Preview`. However, you can enable it by modifying `run.yaml` in your custom image as shown in the [observability configuration guide](https://github.com/opendatahub-io/llama-stack-demos/blob/main/kubernetes/observability/run-configuration.md).
 
 #### 2. Add OpenTelemetry Sidecar Injection
 
