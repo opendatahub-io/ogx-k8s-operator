@@ -29,7 +29,8 @@ func NewClusterInfo(ctx context.Context, client client.Client, embeddedDistribut
 	var distributionImages map[string]string
 	if os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION") != "" {
 		distributionImages = map[string]string{
-			"rh": os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION"),
+			"rh":     os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION"),
+			"rh-dev": os.Getenv("RELATED_IMAGE_RH_DISTRIBUTION"),
 		}
 	} else {
 		if err := json.Unmarshal(embeddedDistributions, &distributionImages); err != nil {
