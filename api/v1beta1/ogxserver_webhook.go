@@ -80,12 +80,23 @@ func (v *OGXServerValidator) ValidateDelete(_ context.Context, _ runtime.Object)
 	return nil, nil
 }
 
+// DeprecatedDistributions maps deprecated distribution names to their replacements.
+var DeprecatedDistributions = map[string]string{
+	"rh-dev": "rh",
+}
+
 func (v *OGXServerValidator) validate(r *OGXServer) (admission.Warnings, error) {
 	allErrs := v.collectValidationErrors(r)
 	if len(allErrs) > 0 {
 		return nil, allErrs.ToAggregate()
 	}
-	return nil, nil
+
+	var warnings admission.Warnings
+	if replacement, ok := DeprecatedDistributions[r.Spec.Distribution.Name]; ok {
+		warnings = append(warnings,
+			fmt.Sprintf("spec.distribution.name %q is deprecated, use %q instead", r.Spec.Distribution.Name, replacement))
+	}
+	return warnings, nil
 }
 
 func (v *OGXServerValidator) collectValidationErrors(r *OGXServer) field.ErrorList {
