@@ -7279,6 +7279,14 @@ spec:
           value: latest
         - name: RELATED_IMAGE_RH_DISTRIBUTION
           value: ""
+        - name: RELATED_IMAGE_STARTER
+          value: ""
+        - name: RELATED_IMAGE_REMOTE_VLLM
+          value: ""
+        - name: RELATED_IMAGE_META_REFERENCE_GPU
+          value: ""
+        - name: RELATED_IMAGE_POSTGRES_DEMO
+          value: ""
         image: quay.io/ogx-ai/ogx-k8s-operator:latest
         imagePullPolicy: Always
         livenessProbe:
