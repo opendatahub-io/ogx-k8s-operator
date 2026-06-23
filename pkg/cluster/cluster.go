@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"github.com/ogx-ai/ogx-k8s-operator/pkg/deploy"
@@ -38,10 +39,29 @@ func NewClusterInfo(ctx context.Context, client client.Client, embeddedDistribut
 		}
 	}
 
+	applyRelatedImageOverrides(distributionImages)
+
 	return &ClusterInfo{
 		OperatorNamespace:  operatorNamespace,
 		DistributionImages: distributionImages,
 	}, nil
+}
+
+// applyRelatedImageOverrides overrides distribution images with RELATED_IMAGE_* env vars
+// when set. OLM injects these with mirrored image digests for disconnected environments.
+func applyRelatedImageOverrides(distributionImages map[string]string) {
+	for name := range distributionImages {
+		envKey := DistributionEnvVarKey(name)
+		if override := os.Getenv(envKey); override != "" {
+			distributionImages[name] = override
+		}
+	}
+}
+
+// DistributionEnvVarKey converts a distribution name to its RELATED_IMAGE_* env var name.
+// Example: "remote-vllm" becomes "RELATED_IMAGE_REMOTE_VLLM".
+func DistributionEnvVarKey(name string) string {
+	return "RELATED_IMAGE_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 }
 
 // PerformUpgradeCleanup performs one-time cleanup operations for seamless upgrades.
