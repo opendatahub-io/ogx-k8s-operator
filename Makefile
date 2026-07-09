@@ -58,6 +58,7 @@ ENVTEST_K8S_VERSION = 1.31.0
 # Image URL to use all building/pushing image targets
 IMG_TAG ?= latest
 IMG ?= $(IMAGE_TAG_BASE):$(IMG_TAG)
+OGX_MODULE_IMG ?= quay.io/opendatahub/odh-ogx-module-operator:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -282,6 +283,18 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 .PHONY: image
 image: image-build image-push ## Build and push image with the manager.
 
+.PHONY: ogx-module-image-build
+ogx-module-image-build: ## Build the ogx-module operator image.
+	@echo "Building ogx-module image for platform: $(PLATFORM)"
+	$(CONTAINER_TOOL) build -f ogx-module/Dockerfile --platform $(PLATFORM) --no-cache -t ${OGX_MODULE_IMG} .
+
+.PHONY: ogx-module-image-push
+ogx-module-image-push: ## Push the ogx-module operator image.
+	$(CONTAINER_TOOL) push ${OGX_MODULE_IMG}
+
+.PHONY: ogx-module-image
+ogx-module-image: ogx-module-image-build ogx-module-image-push ## Build and push the ogx-module operator image.
+
 ##@ Deployment
 
 ifndef ignore-not-found
@@ -305,6 +318,15 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster (cert-manage
 deploy-openshift: manifests kustomize ## Deploy controller to an OpenShift cluster (service-serving-cert-signer).
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/overlays/openshift | oc apply -f -
+
+.PHONY: ogx-module-deploy
+ogx-module-deploy: kustomize ## Deploy the ogx-module operator from its default bundle.
+	cd ogx-module/config/manager && $(KUSTOMIZE) edit set image controller=${OGX_MODULE_IMG}
+	$(KUSTOMIZE) build ogx-module/config/default | kubectl apply -f -
+
+.PHONY: ogx-module-undeploy
+ogx-module-undeploy: kustomize ## Undeploy the ogx-module operator from the current cluster.
+	$(KUSTOMIZE) build ogx-module/config/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

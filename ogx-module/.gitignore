@@ -1,0 +1,5 @@
+# Downloaded manifests (fetched by get-manifests.sh)
+config/manifests/ogx/
+
+# Built binary
+ogx-module
