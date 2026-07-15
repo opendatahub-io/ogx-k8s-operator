@@ -90,6 +90,12 @@ func LoadFromFS(fsys fs.FS) (*Config, error) {
 	v := viper.New()
 	setDefaults(v)
 
+	// The ODH operator injects "platformVersion" (camelCase) into the
+	// platform ConfigMap. Viper lowercases it to "platformversion". This
+	// alias maps it to the canonical kebab-case key so it populates
+	// Config.PlatformVersion regardless of which key name was used.
+	v.RegisterAlias("platformversion", KeyPlatformVersion)
+
 	if fsys != nil {
 		if err := loadFromFS(v, fsys); err != nil {
 			return nil, fmt.Errorf("failed to load config from filesystem: %w", err)

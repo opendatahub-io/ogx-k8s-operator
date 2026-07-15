@@ -513,6 +513,16 @@ func (r *Reconciler) updateStatus(
 		instance.Status.ComponentReleaseStatus = releases
 	}
 
+	if r.Config.PlatformVersion != "" && r.Config.PlatformVersion != "unknown" {
+		instance.Status.ComponentReleaseStatus.Releases = append(
+			instance.Status.ComponentReleaseStatus.Releases,
+			common.ComponentRelease{
+				Name:    "platform",
+				Version: r.Config.PlatformVersion,
+			},
+		)
+	}
+
 	cm := odhconditions.NewManager(
 		instance,
 		string(common.ConditionTypeReady),
