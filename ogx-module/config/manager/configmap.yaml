@@ -7,4 +7,3 @@ metadata:
     app.kubernetes.io/name: opendatahub-ogx-operator
 data:
   platform-name: "OpenDataHub"
-  platform-version: "unknown"
