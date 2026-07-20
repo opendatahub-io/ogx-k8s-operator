@@ -30,3 +30,6 @@ jobs:
 
       - name: Build and push odh image
         run: make image-build image-push -e IMG=quay.io/opendatahub/odh-ogx-k8s-operator:odh
+
+      - name: Build and push odh ogx-module image
+        run: make ogx-module-image -e OGX_MODULE_IMG=quay.io/opendatahub/odh-ogx-module-operator:odh
