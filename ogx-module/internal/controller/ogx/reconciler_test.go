@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
+	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
 	common "github.com/opendatahub-io/odh-platform-utilities/api/common"
 	odhgc "github.com/opendatahub-io/odh-platform-utilities/pkg/controller/gc"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -18,9 +20,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
-	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
 )
 
 func TestManagementState(t *testing.T) {
@@ -390,7 +389,7 @@ func TestUpdateStatus(t *testing.T) {
 			wantProvisioned:    metav1.ConditionTrue,
 			wantDegraded:       metav1.ConditionFalse,
 			wantWebhookReady:   metav1.ConditionTrue,
-			wantReleaseEntries: 2,
+			wantReleaseEntries: 3,
 		},
 		{
 			name:         "ready but degraded",
@@ -408,7 +407,7 @@ func TestUpdateStatus(t *testing.T) {
 			wantProvisioned:    metav1.ConditionTrue,
 			wantDegraded:       metav1.ConditionTrue,
 			wantWebhookReady:   metav1.ConditionTrue,
-			wantReleaseEntries: 2,
+			wantReleaseEntries: 3,
 		},
 		{
 			name:               "removed state",
@@ -418,7 +417,7 @@ func TestUpdateStatus(t *testing.T) {
 			wantProvisioned:    metav1.ConditionFalse,
 			wantDegraded:       metav1.ConditionFalse,
 			wantWebhookReady:   metav1.ConditionFalse,
-			wantReleaseEntries: 2,
+			wantReleaseEntries: 3,
 		},
 		{
 			name:               "webhook not ready keeps module not ready",
@@ -431,7 +430,7 @@ func TestUpdateStatus(t *testing.T) {
 			wantProvisioned:    metav1.ConditionTrue,
 			wantDegraded:       metav1.ConditionFalse,
 			wantWebhookReady:   metav1.ConditionFalse,
-			wantReleaseEntries: 2,
+			wantReleaseEntries: 3,
 		},
 	}
 
@@ -684,41 +683,34 @@ func TestResolveImageParamOverride(t *testing.T) {
 		},
 		{
 			name:      "valid image reference",
-			key:       "RELATED_IMAGE_ODH_OGX_OPERATOR",
-			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "quay.io/opendatahub/odh-ogx-k8s-operator:v1.2.3"},
+			key:       "RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE",
+			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": "quay.io/opendatahub/odh-ogx-k8s-operator:v1.2.3"},
 			wantValue: "quay.io/opendatahub/odh-ogx-k8s-operator:v1.2.3",
 			wantOK:    true,
 		},
 		{
 			name:      "valid image reference with digest",
-			key:       "RELATED_IMAGE_RH_DISTRIBUTION",
-			envVars:   map[string]string{"RELATED_IMAGE_RH_DISTRIBUTION": "quay.io/opendatahub/ogx-core@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
+			key:       "RELATED_IMAGE_ODH_OGX_CORE_IMAGE",
+			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_CORE_IMAGE": "quay.io/opendatahub/ogx-core@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"},
 			wantValue: "quay.io/opendatahub/ogx-core@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 			wantOK:    true,
 		},
 		{
 			name:   "empty env returns false",
-			key:    "RELATED_IMAGE_ODH_OGX_OPERATOR",
+			key:    "RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE",
 			wantOK: false,
 		},
 		{
 			name:    "invalid image reference is rejected",
-			key:     "RELATED_IMAGE_ODH_OGX_OPERATOR",
-			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "INVALID@@@image::ref"},
+			key:     "RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE",
+			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": "INVALID@@@image::ref"},
 			wantOK:  false,
 		},
 		{
 			name:    "image with newline is rejected",
-			key:     "RELATED_IMAGE_ODH_OGX_OPERATOR",
-			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_OPERATOR": "quay.io/repo/img:tag\nmalicious=injected"},
+			key:     "RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE",
+			envVars: map[string]string{"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": "quay.io/repo/img:tag\nmalicious=injected"},
 			wantOK:  false,
-		},
-		{
-			name:      "fallback env var is used",
-			key:       "RELATED_IMAGE_ODH_OGX_OPERATOR",
-			envVars:   map[string]string{"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": "quay.io/opendatahub/odh-ogx-k8s-operator:v2.0.0"},
-			wantValue: "quay.io/opendatahub/odh-ogx-k8s-operator:v2.0.0",
-			wantOK:    true,
 		},
 	}
 
