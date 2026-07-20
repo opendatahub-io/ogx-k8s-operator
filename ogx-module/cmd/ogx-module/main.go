@@ -4,6 +4,9 @@ import (
 	"flag"
 	"os"
 
+	controllerogx "github.com/ogx-ai/ogx-k8s-operator/ogx-module/internal/controller/ogx"
+	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
+	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -13,10 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	controllerogx "github.com/ogx-ai/ogx-k8s-operator/ogx-module/internal/controller/ogx"
-	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
-	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
 )
 
 var (

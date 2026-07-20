@@ -60,6 +60,9 @@ func TestBuildContainerSpec(t *testing.T) {
 		assert.Equal(t, ogxiov1beta1.DefaultContainerName, c.Name)
 		assert.Equal(t, "test-image:latest", c.Image)
 		assert.Equal(t, ogxiov1beta1.DefaultServerPort, c.Ports[0].ContainerPort)
+		require.Len(t, c.Ports, 2, "expected API + metrics ports by default")
+		assert.Equal(t, int32(9464), c.Ports[1].ContainerPort)
+		assert.Equal(t, "metrics", c.Ports[1].Name)
 		assert.Equal(t, newDefaultStartupProbe(ogxiov1beta1.DefaultServerPort), c.StartupProbe)
 		var foundOgxVol bool
 		for _, m := range c.VolumeMounts {
@@ -167,6 +170,101 @@ func TestContainerEnvVarDedup(t *testing.T) {
 			break
 		}
 	}
+}
+
+func TestMetricsEnvVarsAndPort(t *testing.T) {
+	metricsEnvNames := []string{"OGX_METRICS_ENDPOINT_ENABLED", "OGX_METRICS_HOST", "OGX_METRICS_PORT"}
+
+	findEnv := func(envs []corev1.EnvVar, name string) (string, bool) {
+		for _, e := range envs {
+			if e.Name == name {
+				return e.Value, true
+			}
+		}
+		return "", false
+	}
+
+	t.Run("monitoring nil means enabled by default", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "img", nil, nil)
+		for _, name := range metricsEnvNames {
+			_, found := findEnv(c.Env, name)
+			assert.True(t, found, "expected %s when monitoring is nil", name)
+		}
+		v, _ := findEnv(c.Env, "OGX_METRICS_HOST")
+		assert.Equal(t, "0.0.0.0", v)
+		v, _ = findEnv(c.Env, "OGX_METRICS_PORT")
+		assert.Equal(t, "9464", v)
+		require.Len(t, c.Ports, 2)
+		assert.Equal(t, int32(9464), c.Ports[1].ContainerPort)
+	})
+
+	t.Run("monitoring explicitly enabled", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+				Monitoring:   &ogxiov1beta1.MonitoringSpec{Enabled: boolPtr(true)},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "img", nil, nil)
+		for _, name := range metricsEnvNames {
+			_, found := findEnv(c.Env, name)
+			assert.True(t, found, "expected %s when monitoring enabled", name)
+		}
+		require.Len(t, c.Ports, 2)
+	})
+
+	t.Run("monitoring disabled", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+				Monitoring:   &ogxiov1beta1.MonitoringSpec{Enabled: boolPtr(false)},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "img", nil, nil)
+		for _, name := range metricsEnvNames {
+			_, found := findEnv(c.Env, name)
+			assert.False(t, found, "expected no %s when monitoring disabled", name)
+		}
+		require.Len(t, c.Ports, 1, "only API port when monitoring disabled")
+	})
+
+	t.Run("custom metrics port", func(t *testing.T) {
+		port := int32(9999)
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+				Monitoring:   &ogxiov1beta1.MonitoringSpec{MetricsPort: &port},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "img", nil, nil)
+		v, found := findEnv(c.Env, "OGX_METRICS_PORT")
+		require.True(t, found)
+		assert.Equal(t, "9999", v)
+		require.Len(t, c.Ports, 2)
+		assert.Equal(t, int32(9999), c.Ports[1].ContainerPort)
+	})
+
+	t.Run("user override of metrics host", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+				Workload: &ogxiov1beta1.WorkloadSpec{
+					Overrides: &ogxiov1beta1.WorkloadOverrides{
+						Env: []corev1.EnvVar{{Name: "OGX_METRICS_HOST", Value: "127.0.0.1"}},
+					},
+				},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "img", nil, nil)
+		v, found := findEnv(c.Env, "OGX_METRICS_HOST")
+		require.True(t, found)
+		assert.Equal(t, "127.0.0.1", v, "user override should win")
+	})
 }
 
 func TestResolveImage(t *testing.T) {
@@ -279,6 +377,46 @@ func TestNeedsPodDisruptionBudget(t *testing.T) {
 			assert.Equal(t, tt.want, needsPodDisruptionBudget(tt.instance))
 		})
 	}
+}
+
+func TestBuildContainerSpecRuntimeConfig(t *testing.T) {
+	t.Run("runtimeConfig sets RUN_CONFIG_PATH and preserves entrypoint", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+			},
+		}
+		rc := &runtimeConfigRef{ConfigMapName: "my-config", ConfigMapKey: "config.yaml"}
+		c := buildContainerSpec(t.Context(), nil, instance, "test-image:latest", rc, nil)
+
+		var foundRunConfig, foundOgxConfig bool
+		for _, e := range c.Env {
+			if e.Name == "RUN_CONFIG_PATH" {
+				assert.Equal(t, "/etc/ogx/config.yaml", e.Value)
+				foundRunConfig = true
+			}
+			if e.Name == "OGX_CONFIG" {
+				assert.Equal(t, "/etc/ogx/config.yaml", e.Value)
+				foundOgxConfig = true
+			}
+		}
+		assert.True(t, foundRunConfig, "expected RUN_CONFIG_PATH env var when runtimeConfig is set")
+		assert.True(t, foundOgxConfig, "expected OGX_CONFIG env var when runtimeConfig is set")
+		assert.Nil(t, c.Command, "container command should not be overridden when runtimeConfig is set")
+	})
+
+	t.Run("no runtimeConfig omits RUN_CONFIG_PATH and OGX_CONFIG", func(t *testing.T) {
+		instance := &ogxiov1beta1.OGXServer{
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "x:latest"},
+			},
+		}
+		c := buildContainerSpec(t.Context(), nil, instance, "test-image:latest", nil, nil)
+		for _, e := range c.Env {
+			assert.NotEqual(t, "RUN_CONFIG_PATH", e.Name, "RUN_CONFIG_PATH should not be set without runtimeConfig")
+			assert.NotEqual(t, "OGX_CONFIG", e.Name, "OGX_CONFIG should not be set without runtimeConfig")
+		}
+	})
 }
 
 func TestBuildPodDisruptionBudgetSpec(t *testing.T) {

@@ -94,9 +94,9 @@ spec:
               value: /etc/controller/config
             - name: ODH_MODULE_OPERATOR_MANIFESTS_PATH
               value: /opt/manifests
-            - name: RELATED_IMAGE_ODH_OGX_OPERATOR
+            - name: RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE
               value: ""
-            - name: RELATED_IMAGE_RH_DISTRIBUTION
+            - name: RELATED_IMAGE_ODH_OGX_CORE_IMAGE
               value: ""
             - name: ODH_MODULE_OPERATOR_NAMESPACE
               valueFrom:

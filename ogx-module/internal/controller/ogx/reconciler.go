@@ -10,6 +10,14 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
+	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
+	common "github.com/opendatahub-io/odh-platform-utilities/api/common"
+	odhconditions "github.com/opendatahub-io/odh-platform-utilities/pkg/controller/conditions"
+	odhgc "github.com/opendatahub-io/odh-platform-utilities/pkg/controller/gc"
+	odhdeploy "github.com/opendatahub-io/odh-platform-utilities/pkg/deploy"
+	odhlabels "github.com/opendatahub-io/odh-platform-utilities/pkg/metadata/labels"
+	odhkustomize "github.com/opendatahub-io/odh-platform-utilities/pkg/render/kustomize"
 	"gopkg.in/yaml.v3"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,15 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
-
-	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
-	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
-	common "github.com/opendatahub-io/odh-platform-utilities/api/common"
-	odhconditions "github.com/opendatahub-io/odh-platform-utilities/pkg/controller/conditions"
-	odhgc "github.com/opendatahub-io/odh-platform-utilities/pkg/controller/gc"
-	odhdeploy "github.com/opendatahub-io/odh-platform-utilities/pkg/deploy"
-	odhlabels "github.com/opendatahub-io/odh-platform-utilities/pkg/metadata/labels"
-	odhkustomize "github.com/opendatahub-io/odh-platform-utilities/pkg/render/kustomize"
 )
 
 const (
@@ -59,8 +58,8 @@ var (
 	namespaceGVK     = corev1.SchemeGroupVersion.WithKind("Namespace")
 	ogxServerGVK     = schema.GroupVersionKind{Group: "ogx.io", Version: "v1beta1", Kind: "OGXServer"}
 	imageParamEnvMap = map[string][]string{
-		"RELATED_IMAGE_ODH_OGX_OPERATOR": {"RELATED_IMAGE_ODH_OGX_OPERATOR", "RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE"},
-		"RELATED_IMAGE_RH_DISTRIBUTION":  {"RELATED_IMAGE_RH_DISTRIBUTION", "RELATED_IMAGE_ODH_OGX_CORE_IMAGE"},
+		"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": {"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE"},
+		"RELATED_IMAGE_ODH_OGX_CORE_IMAGE":         {"RELATED_IMAGE_ODH_OGX_CORE_IMAGE"},
 	}
 )
 

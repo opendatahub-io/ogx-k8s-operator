@@ -171,6 +171,116 @@ metadata:
 		assert.Equal(t, "test-fallback-ns", res.GetNamespace(), "Deployment should have the correct namespace set by plugin")
 	})
 
+	t.Run("should render PrometheusRule and apply name prefix", func(t *testing.T) {
+		fsys := filesys.MakeFsInMemory()
+		require.NoError(t, fsys.MkdirAll(manifestBasePath))
+
+		kustomizationContent := `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - prometheusrule.yaml
+`
+		require.NoError(t, fsys.WriteFile(filepath.Join(manifestBasePath, "kustomization.yaml"), []byte(kustomizationContent)))
+
+		promRuleContent := `
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: prometheus-rules
+spec:
+  groups:
+  - name: telemetry.rules
+    interval: 60s
+    rules:
+    - record: ogx:api_info:max
+      labels:
+        api: inference
+      expr: clamp_max(ogx_requests_total{api="inference"}, 1)
+`
+		require.NoError(t, fsys.WriteFile(filepath.Join(manifestBasePath, "prometheusrule.yaml"), []byte(promRuleContent)))
+
+		owner := &ogxiov1beta1.OGXServer{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-ogx",
+				Namespace: "test-prom-ns",
+			},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+			},
+		}
+
+		resMap, err := RenderManifest(fsys, manifestBasePath, owner)
+		require.NoError(t, err)
+		require.Equal(t, 1, (*resMap).Size())
+
+		res := (*resMap).Resources()[0]
+		require.Equal(t, "PrometheusRule", res.GetKind())
+		require.Equal(t, "my-ogx-prometheus-rules", res.GetName())
+		assert.Equal(t, "test-prom-ns", res.GetNamespace())
+	})
+
+	t.Run("should render ServiceMonitor and apply name prefix", func(t *testing.T) {
+		fsys := filesys.MakeFsInMemory()
+		require.NoError(t, fsys.MkdirAll(manifestBasePath))
+
+		kustomizationContent := `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - servicemonitor.yaml
+`
+		require.NoError(t, fsys.WriteFile(filepath.Join(manifestBasePath, "kustomization.yaml"), []byte(kustomizationContent)))
+
+		smContent := `
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: service-monitor
+  labels:
+    monitoring.opendatahub.io/scrape: "true"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: ogx-operator
+      app.kubernetes.io/part-of: ogx
+  endpoints:
+  - targetPort: metrics
+    path: /metrics
+    interval: 60s
+`
+		require.NoError(t, fsys.WriteFile(filepath.Join(manifestBasePath, "servicemonitor.yaml"), []byte(smContent)))
+
+		owner := &ogxiov1beta1.OGXServer{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-ogx",
+				Namespace: "test-sm-ns",
+			},
+			Spec: ogxiov1beta1.OGXServerSpec{
+				Distribution: ogxiov1beta1.DistributionSpec{Image: "test-image:latest"},
+			},
+		}
+
+		resMap, err := RenderManifest(fsys, manifestBasePath, owner)
+		require.NoError(t, err)
+		require.Equal(t, 1, (*resMap).Size())
+
+		res := (*resMap).Resources()[0]
+		require.Equal(t, "ServiceMonitor", res.GetKind())
+		require.Equal(t, "my-ogx-service-monitor", res.GetName())
+		assert.Equal(t, "test-sm-ns", res.GetNamespace())
+
+		yamlBytes, err := res.AsYAML()
+		require.NoError(t, err)
+		yamlStr := string(yamlBytes)
+		assert.Contains(t, yamlStr, "path: /metrics")
+		assert.Contains(t, yamlStr, "targetPort: metrics")
+		assert.Contains(t, yamlStr, "monitoring.opendatahub.io/scrape: \"true\"")
+		assert.Contains(t, yamlStr, "interval: 60s")
+		assert.Contains(t, yamlStr, "app.kubernetes.io/managed-by: ogx-operator")
+		assert.Contains(t, yamlStr, "app.kubernetes.io/part-of: ogx")
+	})
+
 	t.Run("should return an error if a resource file is missing", func(t *testing.T) {
 		// given a kustomization.yaml that references a file that does not exist
 		fsys := filesys.MakeFsInMemory()
@@ -545,6 +655,20 @@ func TestFilterExcludeKinds(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, (*filtered).Size())
 		require.Equal(t, "Deployment", (*filtered).Resources()[0].GetKind())
+	})
+
+	t.Run("excludes PrometheusRule kind", func(t *testing.T) {
+		promRule := newTestResource(t, "monitoring.coreos.com/v1", "PrometheusRule", "test-rules", "test-ns", nil)
+		svc := newTestResource(t, "v1", "Service", "test-svc", "test-ns", nil)
+
+		resMap := resmap.New()
+		require.NoError(t, resMap.Append(promRule))
+		require.NoError(t, resMap.Append(svc))
+
+		filtered, err := FilterExcludeKinds(&resMap, []string{"PrometheusRule"})
+		require.NoError(t, err)
+		require.Equal(t, 1, (*filtered).Size())
+		require.Equal(t, "Service", (*filtered).Resources()[0].GetKind())
 	})
 }
 

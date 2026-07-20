@@ -187,7 +187,7 @@ func mergeStructuredFile(v *viper.Viper, name, ext string, data []byte) error {
 	fv.SetConfigType(ext)
 
 	if err := fv.ReadConfig(strings.NewReader(string(data))); err != nil {
-			return fmt.Errorf("failed to parse config file %s: %w", name, err)
+		return fmt.Errorf("failed to parse config file %s: %w", name, err)
 	}
 
 	if err := v.MergeConfigMap(fv.AllSettings()); err != nil {

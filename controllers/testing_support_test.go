@@ -299,15 +299,23 @@ func AssertPVCHasSize(t *testing.T, pvc *corev1.PersistentVolumeClaim, expectedS
 
 func AssertServicePortMatches(t *testing.T, service *corev1.Service, expectedPort corev1.ServicePort) {
 	t.Helper()
-	require.Len(t, service.Spec.Ports, 1, "Service should have exactly one port")
-	require.Equal(t, expectedPort, service.Spec.Ports[0], "Service port should match expected")
+	require.NotEmpty(t, service.Spec.Ports, "Service should have at least one port")
+	var found bool
+	for _, p := range service.Spec.Ports {
+		if p.Name == expectedPort.Name {
+			require.Equal(t, expectedPort, p, "Service port %q should match expected", expectedPort.Name)
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "Service should contain port named %q", expectedPort.Name)
 }
 
 func AssertServiceAndDeploymentPortsAlign(t *testing.T, service *corev1.Service, deployment *appsv1.Deployment) {
 	t.Helper()
-	require.Len(t, service.Spec.Ports, 1, "Service should have exactly one port")
+	require.NotEmpty(t, service.Spec.Ports, "Service should have at least one port")
 	require.Len(t, deployment.Spec.Template.Spec.Containers, 1, "Deployment should have exactly one container")
-	require.Len(t, deployment.Spec.Template.Spec.Containers[0].Ports, 1, "Container should have exactly one port")
+	require.NotEmpty(t, deployment.Spec.Template.Spec.Containers[0].Ports, "Container should have at least one port")
 
 	serviceTargetPort := service.Spec.Ports[0].TargetPort.IntVal
 	containerPort := deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort
@@ -357,7 +365,7 @@ func hasMatchingIngressRule(
 func AssertNetworkPolicyAllowsDeploymentPort(t *testing.T, networkPolicy *networkingv1.NetworkPolicy, deployment *appsv1.Deployment, operatorNamespace string) {
 	t.Helper()
 	require.Len(t, deployment.Spec.Template.Spec.Containers, 1, "Deployment should have exactly one container")
-	require.Len(t, deployment.Spec.Template.Spec.Containers[0].Ports, 1, "Container should have exactly one port")
+	require.NotEmpty(t, deployment.Spec.Template.Spec.Containers[0].Ports, "Container should have at least one port")
 	containerPort := deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort
 
 	sameNamespacePredicate := func(peer networkingv1.NetworkPolicyPeer) bool {

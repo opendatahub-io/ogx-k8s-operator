@@ -40,6 +40,8 @@ const (
 	FSGroup = int64(1001)
 	// instanceLabelKey is the label we apply to all resources for per-instance targeting.
 	instanceLabelKey = "app.kubernetes.io/instance"
+	// defaultMetricsPort is the default port for the OGX metrics endpoint.
+	defaultMetricsPort = int32(9464)
 )
 
 var (
@@ -86,51 +88,6 @@ func getManagedCABundleConfigMapName(instance *ogxiov1beta1.OGXServer) string {
 	return instance.Name + ManagedCABundleConfigMapSuffix
 }
 
-// startupScript is the script that will be used to start the server.
-var startupScript = `
-set -e
-
-# Determine which CLI to use based on ogx version
-VERSION_CODE=$(python -c "
-import sys
-from importlib.metadata import version
-from packaging import version as pkg_version
-
-try:
-    ogx_version = version('ogx')
-    print(f'Detected ogx version: {ogx_version}', file=sys.stderr)
-
-    v = pkg_version.parse(ogx_version)
-    # Use base_version to ignore pre-release/post-release/dev suffixes
-    # This ensures that 0.3.0rc2, 0.3.0alpha1, etc. are treated as 0.3.0
-    base_v = pkg_version.parse(v.base_version)
-
-    if base_v < pkg_version.parse('0.2.17'):
-        print('Using legacy module path (ogx.distribution.server.server)', file=sys.stderr)
-        print(0)
-    elif base_v < pkg_version.parse('0.3.0'):
-        print('Using core module path (ogx.core.server.server)', file=sys.stderr)
-        print(1)
-    else:
-        print('Using uvicorn CLI command', file=sys.stderr)
-        print(2)
-except Exception as e:
-    print(f'Version detection failed, defaulting to new CLI: {e}', file=sys.stderr)
-    print(2)
-")
-
-PORT=${OGX_PORT:-8321}
-WORKERS=${OGX_WORKERS:-1}
-
-# Execute the appropriate CLI based on version
-case $VERSION_CODE in
-    0) python3 -m ogx.distribution.server.server --config /etc/ogx/config.yaml ;;
-    1) python3 -m ogx.core.server.server /etc/ogx/config.yaml ;;
-    2) exec uvicorn ogx.core.server.server:create_app --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" --factory ;;
-    *) echo "Invalid version code: $VERSION_CODE, using uvicorn CLI command"; \
-       exec uvicorn ogx.core.server.server:create_app --host 0.0.0.0 --port "$PORT" --workers "$WORKERS" --factory ;;
-esac`
-
 const ogxConfigPath = "/etc/ogx/config.yaml"
 
 // getHealthProbe returns the health probe handler for the container.
@@ -154,6 +111,17 @@ func getStartupProbe(instance *ogxiov1beta1.OGXServer) *corev1.Probe {
 	}
 }
 
+func isMonitoringDisabled(instance *ogxiov1beta1.OGXServer) bool {
+	return instance.Spec.Monitoring != nil && instance.Spec.Monitoring.Enabled != nil && !*instance.Spec.Monitoring.Enabled
+}
+
+func getMetricsPort(instance *ogxiov1beta1.OGXServer) int32 {
+	if instance.Spec.Monitoring != nil && instance.Spec.Monitoring.MetricsPort != nil {
+		return *instance.Spec.Monitoring.MetricsPort
+	}
+	return defaultMetricsPort
+}
+
 // buildContainerSpec creates the container specification.
 func buildContainerSpec(
 	ctx context.Context,
@@ -164,14 +132,21 @@ func buildContainerSpec(
 	secretEnvVars []corev1.EnvVar,
 ) corev1.Container {
 	workers, workersSet := getEffectiveWorkers(instance)
+	ports := []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}}
+	if !isMonitoringDisabled(instance) {
+		ports = append(ports, corev1.ContainerPort{
+			Name:          "metrics",
+			ContainerPort: getMetricsPort(instance),
+		})
+	}
 	container := corev1.Container{
 		Name:         ogxiov1beta1.DefaultContainerName,
 		Image:        image,
 		Resources:    resolveContainerResources(instance, workers, workersSet),
-		Ports:        []corev1.ContainerPort{{ContainerPort: getContainerPort(instance)}},
+		Ports:        ports,
 		StartupProbe: getStartupProbe(instance),
 	}
-	configureContainerEnvironment(ctx, r, instance, &container, secretEnvVars)
+	configureContainerEnvironment(ctx, r, instance, &container, runtimeConfig, secretEnvVars)
 	configureContainerMounts(ctx, r, instance, runtimeConfig, &container)
 	configureContainerCommands(instance, runtimeConfig, &container)
 	return container
@@ -253,7 +228,10 @@ func getEffectiveWorkers(instance *ogxiov1beta1.OGXServer) (int32, bool) {
 }
 
 // configureContainerEnvironment sets up environment variables for the container.
-func configureContainerEnvironment(ctx context.Context, r *OGXServerReconciler, instance *ogxiov1beta1.OGXServer, container *corev1.Container, secretEnvVars []corev1.EnvVar) {
+func configureContainerEnvironment(
+	ctx context.Context, r *OGXServerReconciler, instance *ogxiov1beta1.OGXServer,
+	container *corev1.Container, runtimeConfig *runtimeConfigRef, secretEnvVars []corev1.EnvVar,
+) {
 	mountPath := getMountPath(instance)
 	workers, _ := getEffectiveWorkers(instance)
 
@@ -275,7 +253,6 @@ func configureContainerEnvironment(ctx context.Context, r *OGXServerReconciler, 
 		})
 	}
 
-	// Always provide worker/port/config env for uvicorn; workers default to 1 when unspecified.
 	container.Env = append(container.Env,
 		corev1.EnvVar{
 			Name:  "OGX_WORKERS",
@@ -285,11 +262,22 @@ func configureContainerEnvironment(ctx context.Context, r *OGXServerReconciler, 
 			Name:  "OGX_PORT",
 			Value: strconv.Itoa(int(getContainerPort(instance))),
 		},
-		corev1.EnvVar{
-			Name:  "OGX_CONFIG",
-			Value: ogxConfigPath,
-		},
 	)
+
+	// Point the image entrypoint at the mounted config when a runtime
+	// config (overrideConfig or operator-generated) is in use.
+	if runtimeConfig != nil {
+		container.Env = append(container.Env,
+			corev1.EnvVar{
+				Name:  "RUN_CONFIG_PATH",
+				Value: ogxConfigPath,
+			},
+			corev1.EnvVar{
+				Name:  "OGX_CONFIG",
+				Value: ogxConfigPath,
+			},
+		)
+	}
 
 	if instance.Spec.RegistryRefreshIntervalSeconds != nil {
 		container.Env = append(container.Env, corev1.EnvVar{
@@ -297,28 +285,42 @@ func configureContainerEnvironment(ctx context.Context, r *OGXServerReconciler, 
 			Value: strconv.Itoa(int(*instance.Spec.RegistryRefreshIntervalSeconds)),
 		})
 	}
+
+	if !isMonitoringDisabled(instance) {
+		container.Env = append(container.Env,
+			corev1.EnvVar{Name: "OGX_METRICS_ENDPOINT_ENABLED", Value: "1"},
+			corev1.EnvVar{Name: "OGX_METRICS_HOST", Value: "0.0.0.0"},
+			corev1.EnvVar{Name: "OGX_METRICS_PORT", Value: strconv.Itoa(int(getMetricsPort(instance)))},
+		)
+	}
+
 	// Inject pre-computed secret env vars for provider/storage references.
 	// These are computed once in buildManifestContext to avoid redundant tree walks.
 	if len(secretEnvVars) > 0 {
 		container.Env = append(container.Env, secretEnvVars...)
 	}
 
-	// Apply user-provided env vars, letting them override operator defaults.
-	if instance.Spec.Workload != nil && instance.Spec.Workload.Overrides != nil {
-		overrides := make(map[string]corev1.EnvVar, len(instance.Spec.Workload.Overrides.Env))
-		for _, e := range instance.Spec.Workload.Overrides.Env {
-			overrides[e.Name] = e
-		}
-		deduped := make([]corev1.EnvVar, 0, len(container.Env))
-		for _, e := range container.Env {
-			if _, ok := overrides[e.Name]; ok {
-				continue
-			}
-			deduped = append(deduped, e)
-		}
-		deduped = append(deduped, instance.Spec.Workload.Overrides.Env...)
-		container.Env = deduped
+	applyEnvOverrides(instance, container)
+}
+
+// applyEnvOverrides merges user-provided env vars, letting them override operator defaults.
+func applyEnvOverrides(instance *ogxiov1beta1.OGXServer, container *corev1.Container) {
+	if instance.Spec.Workload == nil || instance.Spec.Workload.Overrides == nil {
+		return
 	}
+	overrides := make(map[string]corev1.EnvVar, len(instance.Spec.Workload.Overrides.Env))
+	for _, e := range instance.Spec.Workload.Overrides.Env {
+		overrides[e.Name] = e
+	}
+	deduped := make([]corev1.EnvVar, 0, len(container.Env))
+	for _, e := range container.Env {
+		if _, ok := overrides[e.Name]; ok {
+			continue
+		}
+		deduped = append(deduped, e)
+	}
+	deduped = append(deduped, instance.Spec.Workload.Overrides.Env...)
+	container.Env = deduped
 }
 
 // configureContainerMounts sets up volume mounts for the container.
@@ -359,12 +361,7 @@ func hasAnyCABundle(ctx context.Context, r *OGXServerReconciler, instance *ogxio
 }
 
 // configureContainerCommands sets up container commands and args.
-func configureContainerCommands(instance *ogxiov1beta1.OGXServer, runtimeConfig *runtimeConfigRef, container *corev1.Container) {
-	if runtimeConfig != nil {
-		container.Command = []string{"/bin/sh", "-c", startupScript}
-		container.Args = []string{}
-	}
-
+func configureContainerCommands(instance *ogxiov1beta1.OGXServer, _ *runtimeConfigRef, container *corev1.Container) {
 	// Apply user-specified command and args (takes precedence)
 	if instance.Spec.Workload != nil && instance.Spec.Workload.Overrides != nil {
 		if len(instance.Spec.Workload.Overrides.Command) > 0 {
