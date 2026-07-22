@@ -13,9 +13,9 @@ metadata:
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: opendatahub-builds
-    appstudio.openshift.io/component: odh-ogx-k8s-operator-ci
+    appstudio.openshift.io/component: odh-ogx-module-operator-ci
     pipelines.appstudio.openshift.io/type: build
-  name: odh-ogx-k8s-operator-on-push
+  name: odh-ogx-module-operator-on-push
   namespace: open-data-hub-tenant
 spec:
   params:
@@ -24,7 +24,7 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/odh-ogx-k8s-operator:odh-stable
+    value: quay.io/opendatahub/odh-ogx-module-operator:odh-stable
   - name: dockerfile
     value: Dockerfile
   - name: path-context
@@ -39,7 +39,7 @@ spec:
     - name: pathInRepo
       value: pipeline/multi-arch-container-build.yaml
   taskRunTemplate:
-    serviceAccountName: build-pipeline-odh-ogx-k8s-operator-ci
+    serviceAccountName: build-pipeline-odh-ogx-module-operator-ci
   workspaces:
   - name: git-auth
     secret:
