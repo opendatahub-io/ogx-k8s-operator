@@ -29,6 +29,9 @@ spec:
     value: Dockerfile
   - name: path-context
     value: .
+  - name: additional-tags
+    value:
+      - odh
   pipelineRef:
     resolver: git
     params:
