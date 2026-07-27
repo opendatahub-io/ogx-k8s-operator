@@ -8,4 +8,4 @@ resources:
 images:
 - name: controller
   newName: quay.io/opendatahub/odh-ogx-module-operator
-  newTag: latest
+  newTag: odh-stable

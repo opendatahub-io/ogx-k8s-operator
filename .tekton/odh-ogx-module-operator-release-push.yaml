@@ -26,7 +26,7 @@ spec:
   - name: output-image
     value: quay.io/opendatahub/odh-ogx-module-operator:3.5.0
   - name: dockerfile
-    value: Dockerfile
+    value: ogx-module/Dockerfile
   - name: path-context
     value: .
   pipelineRef:
