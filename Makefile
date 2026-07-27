@@ -58,7 +58,7 @@ ENVTEST_K8S_VERSION = 1.31.0
 # Image URL to use all building/pushing image targets
 IMG_TAG ?= latest
 IMG ?= $(IMAGE_TAG_BASE):$(IMG_TAG)
-OGX_MODULE_IMG ?= quay.io/opendatahub/odh-ogx-module-operator:latest
+OGX_MODULE_IMG ?= quay.io/opendatahub/odh-ogx-module-operator:odh-stable
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -321,12 +321,12 @@ deploy-openshift: manifests kustomize ## Deploy controller to an OpenShift clust
 
 .PHONY: ogx-module-deploy
 ogx-module-deploy: kustomize ## Deploy the ogx-module operator from its default bundle.
-	cd ogx-module/config/manager && $(KUSTOMIZE) edit set image controller=${OGX_MODULE_IMG}
-	$(KUSTOMIZE) build ogx-module/config/default | kubectl apply -f -
+	@echo "RELATED_IMAGE_ODH_OGX_MODULE_OPERATOR_IMAGE=${OGX_MODULE_IMG}" > ogx-module/config/overlays/odh/params.env
+	$(KUSTOMIZE) build ogx-module/config/overlays/odh | kubectl apply -f -
 
 .PHONY: ogx-module-undeploy
 ogx-module-undeploy: kustomize ## Undeploy the ogx-module operator from the current cluster.
-	$(KUSTOMIZE) build ogx-module/config/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
+	$(KUSTOMIZE) build ogx-module/config/overlays/odh | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
