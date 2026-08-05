@@ -11,6 +11,6 @@ on:
 
 jobs:
   check:
-    uses: opendatahub-io/disconnected-readiness-scorer/.github/workflows/disconnected-readiness-check.yml@6f7fc06230f5eeabfd134d819219314d54f0c7e7  # v1.0.0
+    uses: opendatahub-io/disconnected-readiness-scorer/.github/workflows/disconnected-readiness-check.yml@226afbf23967c44422b97654d054e01014038905  # scorer main (post-v1.3.0) — incl. OGX exemptions drs#82/#85; repin to release tag when cut
     with:
       rules: ""
