@@ -1,0 +1,147 @@
+name: Operator Chaos
+
+on:
+  pull_request:
+    paths:
+      - "api/**"
+      - "cmd/**"
+      - "config/**"
+      - "controllers/**"
+      - "pkg/**"
+      - "chaos/knowledge/**"
+      - ".github/workflows/operator-chaos.yml"
+
+permissions:
+  contents: read
+
+env:
+  OPERATOR_CHAOS_VERSION: "9e6ac9668b9aaca2f0f2ddf169867862b7925b80"
+
+jobs:
+  operator-chaos:
+    name: Operator Chaos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install operator-chaos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/bin"
+          GOBIN="${RUNNER_TEMP}/bin" go install "github.com/opendatahub-io/operator-chaos/cmd/operator-chaos@${OPERATOR_CHAOS_VERSION}"
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - name: Checkout base branch assets
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base-branch
+          persist-credentials: false
+          sparse-checkout: |
+            chaos/knowledge
+            config/crd/bases/ogx.io_ogxservers.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Validate knowledge model
+        shell: bash
+        run: |
+          set -euo pipefail
+          operator-chaos validate --knowledge "chaos/knowledge/ogx.yaml"
+
+      - name: Run local preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          operator-chaos preflight --knowledge "chaos/knowledge/ogx.yaml" --local
+
+      - name: Diff knowledge model
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_knowledge_file="base-branch/chaos/knowledge/ogx.yaml"
+          if [[ ! -f "${base_knowledge_file}" ]]; then
+            echo "No base knowledge model found; skipping knowledge diff for bootstrap PR."
+            exit 0
+          fi
+
+          output_dir="${RUNNER_TEMP}/operator-chaos"
+          mkdir -p "${output_dir}"
+          knowledge_diff_json="${output_dir}/knowledge-diff.json"
+
+          operator-chaos diff \
+            --source "base-branch/chaos/knowledge" \
+            --target "chaos/knowledge" \
+            --breaking \
+            --format json > "${knowledge_diff_json}"
+          operator-chaos diff \
+            --source "base-branch/chaos/knowledge" \
+            --target "chaos/knowledge" \
+            --breaking
+
+          knowledge_breaking=$(jq -r '.summary.breakingChanges // 0' "${knowledge_diff_json}")
+          if (( knowledge_breaking > 0 )); then
+            echo "operator-chaos detected ${knowledge_breaking} breaking knowledge change(s)."
+            exit 1
+          fi
+
+      - name: Diff OGXServer CRD schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_crd_path="base-branch/config/crd/bases/ogx.io_ogxservers.yaml"
+          target_crd_path="config/crd/bases/ogx.io_ogxservers.yaml"
+          if [[ ! -f "${source_crd_path}" || ! -f "${target_crd_path}" ]]; then
+            echo "Base or current OGXServer CRD not found; skipping CRD diff for bootstrap PR."
+            exit 0
+          fi
+
+          output_dir="${RUNNER_TEMP}/operator-chaos"
+          mkdir -p "${output_dir}"
+          source_dir="${output_dir}/source-crds"
+          target_dir="${output_dir}/target-crds"
+          crd_diff_json="${output_dir}/crd-diff.json"
+          rm -rf "${source_dir}" "${target_dir}"
+          mkdir -p "${source_dir}" "${target_dir}"
+          cp "${source_crd_path}" "${source_dir}/"
+          cp "${target_crd_path}" "${target_dir}/"
+
+          operator-chaos diff-crds \
+            --source-crds "${source_dir}" \
+            --target-crds "${target_dir}" \
+            --format json > "${crd_diff_json}"
+          operator-chaos diff-crds \
+            --source-crds "${source_dir}" \
+            --target-crds "${target_dir}"
+
+          crd_breaking=$(jq -r '
+            reduce ((.crds // [])[]?.apiVersions[]?.schemaChanges[]?) as $change
+              (0; if ($change.severity | ascii_downcase) == "breaking" then . + 1 else . end)
+          ' "${crd_diff_json}")
+          if (( crd_breaking > 0 )); then
+            echo "operator-chaos detected ${crd_breaking} breaking CRD schema change(s)."
+            exit 1
+          fi
+
+      - name: Preview upgrade simulation
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_knowledge_file="base-branch/chaos/knowledge/ogx.yaml"
+          if [[ ! -f "${base_knowledge_file}" ]]; then
+            echo "No base knowledge model found; skipping simulate-upgrade for bootstrap PR."
+            exit 0
+          fi
+
+          operator-chaos simulate-upgrade \
+            --source "base-branch/chaos/knowledge" \
+            --target "chaos/knowledge" \
+            --dry-run
