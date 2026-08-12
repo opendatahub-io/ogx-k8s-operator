@@ -14,7 +14,11 @@ spec:
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        insecureSkipVerify: true
+        serverName: ogx-k8s-operator-controller-manager-metrics-service.ogx-k8s-operator-system.svc
+        ca:
+          configMap:
+            name: openshift-service-ca.crt
+            key: service-ca.crt
   selector:
     matchLabels:
       control-plane: controller-manager

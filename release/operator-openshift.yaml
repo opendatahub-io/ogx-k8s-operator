@@ -7016,14 +7016,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - config.openshift.io
-  resources:
-  - apiservers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - monitoring.coreos.com
   resources:
   - prometheusrules
@@ -7133,6 +7125,24 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  name: ogx-k8s-operator-metrics-auth
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
   name: ogx-k8s-operator-metrics-reader
@@ -7214,6 +7224,27 @@ rules:
   - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ogx-k8s-operator-tls-profile
+rules:
+- apiGroups:
+  - config.openshift.io
+  resourceNames:
+  - cluster
+  resources:
+  - apiservers
+  verbs:
+  - get
+- apiGroups:
+  - config.openshift.io
+  resources:
+  - apiservers
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
@@ -7247,6 +7278,19 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  name: ogx-k8s-operator-metrics-auth
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogx-k8s-operator-metrics-auth
+subjects:
+- kind: ServiceAccount
+  name: ogx-k8s-operator-controller-manager
+  namespace: ogx-k8s-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
   name: ogx-k8s-operator-proxy-rolebinding
@@ -7254,6 +7298,19 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: ogx-k8s-operator-proxy-role
+subjects:
+- kind: ServiceAccount
+  name: ogx-k8s-operator-controller-manager
+  namespace: ogx-k8s-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ogx-k8s-operator-tls-profile
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ogx-k8s-operator-tls-profile
 subjects:
 - kind: ServiceAccount
   name: ogx-k8s-operator-controller-manager
@@ -7293,6 +7350,8 @@ metadata:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: ogx-k8s-operator-controller-manager-metrics-service-tls
   labels:
     app.kubernetes.io/name: ogx-k8s-operator
     control-plane: controller-manager
@@ -7350,6 +7409,9 @@ spec:
     spec:
       containers:
       - args:
+        - --health-probe-bind-address=:8081
+        - --metrics-bind-address=:8443
+        - --metrics-cert-path=/etc/metrics-certs
         - --leader-elect
         command:
         - /manager
@@ -7378,6 +7440,9 @@ spec:
           periodSeconds: 20
         name: manager
         ports:
+        - containerPort: 8443
+          name: https
+          protocol: TCP
         - containerPort: 9443
           name: webhook-server
           protocol: TCP
@@ -7399,7 +7464,11 @@ spec:
           capabilities:
             drop:
             - ALL
+          readOnlyRootFilesystem: true
         volumeMounts:
+        - mountPath: /etc/metrics-certs
+          name: metrics-certs
+          readOnly: true
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert
           readOnly: true
@@ -7421,6 +7490,10 @@ spec:
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
       volumes:
+      - name: metrics-certs
+        secret:
+          optional: false
+          secretName: ogx-k8s-operator-controller-manager-metrics-service-tls
       - name: cert
         secret:
           defaultMode: 420
@@ -7438,6 +7511,29 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: ogx-k8s-operator
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: controller-manager
+  name: controller-manager-metrics-monitor
+  namespace: ogx-k8s-operator-system
+spec:
+  endpoints:
+  - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    path: /metrics
+    port: https
+    scheme: https
+    tlsConfig:
+      ca:
+        configMap:
+          key: service-ca.crt
+          name: openshift-service-ca.crt
+      serverName: ogx-k8s-operator-controller-manager-metrics-service.ogx-k8s-operator-system.svc
+  selector:
+    matchLabels:
+      control-plane: controller-manager
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration

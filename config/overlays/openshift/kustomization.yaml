@@ -5,9 +5,16 @@ kind: Kustomization
 # No cert-manager dependency is required. The platform automatically:
 # 1. Generates a TLS Secret for the webhook Service via the serving-cert annotation.
 # 2. Injects the CA bundle into the ValidatingWebhookConfiguration.
+# 3. Generates a TLS Secret for the metrics Service for HTTPS metrics serving.
+# 4. Injects the CA bundle into the openshift-service-ca.crt ConfigMap.
 
 resources:
 - ../../default
+- ../../prometheus
+- rbac/tls/tls-profile-clusterrole.yaml
+- rbac/tls/tls-profile-clusterrolebinding.yaml
+- rbac/tls/metrics-auth-clusterrole.yaml
+- rbac/tls/metrics-auth-clusterrolebinding.yaml
 
 patches:
 # Annotate the webhook Service so OpenShift's service-serving-cert-signer
@@ -29,3 +36,25 @@ patches:
       path: /metadata/annotations
       value:
         service.beta.openshift.io/inject-cabundle: "true"
+# Annotate the metrics Service so OpenShift's service-serving-cert-signer
+# generates a TLS certificate for HTTPS metrics serving.
+- target:
+    kind: Service
+    name: controller-manager-metrics-service
+  path: metrics_service_tls_patch.yaml
+# Replace kube-rbac-proxy sidecar with FilterProvider (native RBAC auth),
+# add metrics cert mount, and set the correct metrics bind address.
+- target:
+    kind: Deployment
+    name: controller-manager
+  path: manager_metrics_patch.yaml
+# The ServiceMonitor is added directly to this overlay (not via ../../default),
+# so the default namespace: ogx-k8s-operator-system does not apply to it.
+# This patch ensures it lands in the correct namespace.
+- target:
+    kind: ServiceMonitor
+    name: controller-manager-metrics-monitor
+  patch: |-
+    - op: replace
+      path: /metadata/namespace
+      value: ogx-k8s-operator-system
