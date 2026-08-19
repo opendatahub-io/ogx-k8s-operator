@@ -31,12 +31,17 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 )
 
@@ -50,6 +55,14 @@ const (
 	conditionTypeRootWebhookReady  = "RootWebhookReady"
 	ogxServerDeploymentReady       = "DeploymentReady"
 	ogxServerHealthCheck           = "HealthCheck"
+
+	// platformConfigCMName is the ODH-managed ConfigMap (odh-<module>-config)
+	// that carries data.platformVersion for the version handshake.
+	platformConfigCMName = "odh-" + componentName + "-config"
+	// platformVersionDataKey is the camelCase key injected by the platform
+	// operator. The kebab-case config key is accepted as a fallback.
+	platformVersionDataKey = "platformVersion"
+	platformReleaseName    = "platform"
 )
 
 var (
@@ -134,6 +147,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.ClusterRoleBinding{}).
 		Owns(&admissionv1.ValidatingWebhookConfiguration{}).
 		Owns(&extv1.CustomResourceDefinition{}).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(func(_ context.Context, _ client.Object) []reconcile.Request {
+				return []reconcile.Request{{
+					NamespacedName: types.NamespacedName{Name: platformv1alpha1.OGXInstanceName},
+				}}
+			}),
+			builder.WithPredicates(predicate.NewPredicateFuncs(r.isPlatformConfigMap)),
+		).
 		Complete(r)
 }
 
@@ -154,12 +176,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	if err := r.refreshPlatformVersion(ctx); err != nil {
+		r.updateStatusOnError(ctx, instance, false, false, false, err, "failed to update status after platform config error")
+		return ctrl.Result{}, err
+	}
+
 	rendered, err := r.renderRootOperatorResources()
 	if err != nil {
-		statusErr := r.updateStatus(ctx, instance, false, false, false, ogxServerHealthSummary{}, err)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after render error")
-		}
+		r.updateStatusOnError(ctx, instance, false, false, false, err, "failed to update status after render error")
 		return ctrl.Result{}, err
 	}
 
@@ -189,37 +213,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		Resources: rendered,
 	})
 	if err != nil {
-		statusErr := r.updateStatus(ctx, instance, false, false, false, ogxServerHealthSummary{}, err)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after deploy error")
-		}
+		r.updateStatusOnError(ctx, instance, false, false, false, err, "failed to update status after deploy error")
 		return ctrl.Result{}, err
 	}
 
 	deploymentsReady, readyErr := r.rootDeploymentsReady(ctx, rendered)
 	if readyErr != nil {
-		statusErr := r.updateStatus(ctx, instance, true, false, false, ogxServerHealthSummary{}, readyErr)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after readiness error")
-		}
+		r.updateStatusOnError(ctx, instance, true, false, false, readyErr, "failed to update status after readiness error")
 		return ctrl.Result{}, readyErr
 	}
 
 	webhookReady, webhookErr := r.rootWebhookResourcesReady(ctx, rendered)
 	if webhookErr != nil {
-		statusErr := r.updateStatus(ctx, instance, true, deploymentsReady, false, ogxServerHealthSummary{}, webhookErr)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after webhook readiness error")
-		}
+		r.updateStatusOnError(ctx, instance, true, deploymentsReady, false, webhookErr, "failed to update status after webhook readiness error")
 		return ctrl.Result{}, webhookErr
 	}
 
 	healthSummary, healthErr := r.aggregateOGXServerHealth(ctx)
 	if healthErr != nil {
-		statusErr := r.updateStatus(ctx, instance, true, deploymentsReady, webhookReady, ogxServerHealthSummary{}, healthErr)
-		if statusErr != nil {
-			logger.Error(statusErr, "failed to update status after OGXServer health error")
-		}
+		r.updateStatusOnError(ctx, instance, true, deploymentsReady, webhookReady, healthErr, "failed to update status after OGXServer health error")
 		return ctrl.Result{}, healthErr
 	}
 
@@ -502,7 +514,7 @@ func (r *Reconciler) updateStatus(
 	instance.Status.ObservedGeneration = instance.Generation
 	instance.Status.Distribution = platformv1alpha1.OGXDistribution{
 		Name:    r.Config.PlatformName,
-		Version: r.Config.PlatformVersion,
+		Version: r.platformVersion(),
 	}
 
 	releases, err := r.loadComponentReleases()
@@ -512,15 +524,7 @@ func (r *Reconciler) updateStatus(
 		instance.Status.ComponentReleaseStatus = releases
 	}
 
-	if r.Config.PlatformVersion != "" && r.Config.PlatformVersion != "unknown" {
-		instance.Status.ComponentReleaseStatus.Releases = append(
-			instance.Status.ComponentReleaseStatus.Releases,
-			common.ComponentRelease{
-				Name:    "platform",
-				Version: r.Config.PlatformVersion,
-			},
-		)
-	}
+	setPlatformRelease(&instance.Status.ComponentReleaseStatus, r.platformVersion())
 
 	cm := odhconditions.NewManager(
 		instance,
@@ -678,6 +682,20 @@ func (r *Reconciler) updateStatus(
 	return r.Status().Update(ctx, instance)
 }
 
+func (r *Reconciler) updateStatusOnError(
+	ctx context.Context,
+	instance *platformv1alpha1.OGX,
+	provisioningSucceeded bool,
+	rootOperatorReady bool,
+	rootWebhookReady bool,
+	reconcileErr error,
+	statusLogMsg string,
+) {
+	if statusErr := r.updateStatus(ctx, instance, provisioningSucceeded, rootOperatorReady, rootWebhookReady, ogxServerHealthSummary{}, reconcileErr); statusErr != nil {
+		log.FromContext(ctx).Error(statusErr, statusLogMsg)
+	}
+}
+
 func (r *Reconciler) loadComponentReleases() (common.ComponentReleaseStatus, error) {
 	path := filepath.Join(r.Config.ManifestsPath, componentName, "component_metadata.yaml")
 	data, err := os.ReadFile(path)
@@ -707,6 +725,81 @@ func ensureFinalizer(instance *platformv1alpha1.OGX) bool {
 
 func clearFinalizer(instance *platformv1alpha1.OGX) bool {
 	return controllerutil.RemoveFinalizer(instance, ogxFinalizer)
+}
+
+func (r *Reconciler) refreshPlatformVersion(ctx context.Context) error {
+	version, err := r.readPlatformVersionFromConfigMap(ctx)
+	if err != nil {
+		return err
+	}
+	if version != "" && r.Config != nil {
+		r.Config.PlatformVersion = version
+	}
+
+	return nil
+}
+
+func (r *Reconciler) readPlatformVersionFromConfigMap(ctx context.Context) (string, error) {
+	if r.Config == nil || r.Config.ApplicationsNamespace == "" {
+		return "", nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{
+		Name:      platformConfigCMName,
+		Namespace: r.Config.ApplicationsNamespace,
+	}, cm)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+
+		return "", fmt.Errorf("failed to get platform config ConfigMap %s/%s: %w", r.Config.ApplicationsNamespace, platformConfigCMName, err)
+	}
+
+	if cm.Data == nil {
+		return "", nil
+	}
+
+	if version := strings.TrimSpace(cm.Data[platformVersionDataKey]); version != "" {
+		return version, nil
+	}
+
+	return strings.TrimSpace(cm.Data[moduleconfig.KeyPlatformVersion]), nil
+}
+
+func (r *Reconciler) platformVersion() string {
+	if r.Config == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(r.Config.PlatformVersion)
+}
+
+func (r *Reconciler) isPlatformConfigMap(obj client.Object) bool {
+	if r.Config == nil {
+		return false
+	}
+
+	return obj.GetName() == platformConfigCMName && obj.GetNamespace() == r.Config.ApplicationsNamespace
+}
+
+func setPlatformRelease(status *common.ComponentReleaseStatus, version string) {
+	if status == nil || version == "" || version == moduleconfig.DefaultPlatformVersion {
+		return
+	}
+
+	for i := range status.Releases {
+		if status.Releases[i].Name == platformReleaseName {
+			status.Releases[i].Version = version
+			return
+		}
+	}
+
+	status.Releases = append(status.Releases, common.ComponentRelease{
+		Name:    platformReleaseName,
+		Version: version,
+	})
 }
 
 func overlayForPlatform(platformName string) string {

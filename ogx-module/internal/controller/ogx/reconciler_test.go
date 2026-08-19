@@ -360,6 +360,152 @@ func TestReconcileRemovedClearsFinalizerAndRunsGC(t *testing.T) {
 	}
 }
 
+func TestReconcileReportsPlatformReleaseFromConfigMap(t *testing.T) {
+	t.Parallel()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(clientgoscheme): %v", err)
+	}
+	if err := platformv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(platformv1alpha1): %v", err)
+	}
+
+	const applicationsNS = "opendatahub"
+	manifestsRoot := writeMinimalManifestTree(t)
+	instance := &platformv1alpha1.OGX{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: platformv1alpha1.GroupVersion.String(),
+			Kind:       platformv1alpha1.OGXKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       platformv1alpha1.OGXInstanceName,
+			Generation: 1,
+		},
+		Spec: platformv1alpha1.OGXSpec{
+			ManagementSpec: common.ManagementSpec{ManagementState: common.Managed},
+		},
+	}
+	platformCM := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "ConfigMap",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      platformConfigCMName,
+			Namespace: applicationsNS,
+		},
+		Data: map[string]string{
+			"platform-name":        "OpenDataHub",
+			platformVersionDataKey: "0.0.0",
+		},
+	}
+
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&platformv1alpha1.OGX{}).
+		WithObjects(instance, platformCM).
+		Build()
+
+	reconciler := NewReconciler(cli, cli, scheme, &moduleconfig.Config{
+		ManifestsPath:         manifestsRoot,
+		ApplicationsNamespace: applicationsNS,
+		PlatformName:          "OpenDataHub",
+		PlatformVersion:       moduleconfig.DefaultPlatformVersion,
+	}, nil, nil)
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(instance)}); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &platformv1alpha1.OGX{}
+	if err := cli.Get(context.Background(), client.ObjectKeyFromObject(instance), updated); err != nil {
+		t.Fatalf("Get(updated OGX): %v", err)
+	}
+
+	assertPlatformHandshake(t, updated, "0.0.0")
+}
+
+func TestIsPlatformConfigMap(t *testing.T) {
+	t.Parallel()
+
+	reconciler := &Reconciler{
+		Config: &moduleconfig.Config{ApplicationsNamespace: "opendatahub"},
+	}
+
+	tests := []struct {
+		name      string
+		objName   string
+		namespace string
+		want      bool
+	}{
+		{name: "platform configmap", objName: platformConfigCMName, namespace: "opendatahub", want: true},
+		{name: "wrong name", objName: "other-config", namespace: "opendatahub", want: false},
+		{name: "wrong namespace", objName: platformConfigCMName, namespace: "other", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			obj := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: tt.objName, Namespace: tt.namespace}}
+			if got := reconciler.isPlatformConfigMap(obj); got != tt.want {
+				t.Fatalf("isPlatformConfigMap() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetPlatformRelease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		existing []common.ComponentRelease
+		version  string
+		want     []common.ComponentRelease
+	}{
+		{
+			name:    "appends platform entry",
+			version: "0.0.0",
+			want:    []common.ComponentRelease{{Name: platformReleaseName, Version: "0.0.0"}},
+		},
+		{
+			name:     "updates existing platform entry",
+			existing: []common.ComponentRelease{{Name: platformReleaseName, Version: "old"}, {Name: "OGX", Version: "v1.2.1"}},
+			version:  "0.0.0",
+			want:     []common.ComponentRelease{{Name: platformReleaseName, Version: "0.0.0"}, {Name: "OGX", Version: "v1.2.1"}},
+		},
+		{
+			name:     "skips unknown default",
+			existing: []common.ComponentRelease{{Name: "OGX", Version: "v1.2.1"}},
+			version:  moduleconfig.DefaultPlatformVersion,
+			want:     []common.ComponentRelease{{Name: "OGX", Version: "v1.2.1"}},
+		},
+		{
+			name:     "skips empty version",
+			existing: []common.ComponentRelease{{Name: "OGX", Version: "v1.2.1"}},
+			version:  "",
+			want:     []common.ComponentRelease{{Name: "OGX", Version: "v1.2.1"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			status := common.ComponentReleaseStatus{Releases: append([]common.ComponentRelease(nil), tt.existing...)}
+			setPlatformRelease(&status, tt.version)
+			if len(status.Releases) != len(tt.want) {
+				t.Fatalf("len(Releases) = %d, want %d", len(status.Releases), len(tt.want))
+			}
+			for i := range tt.want {
+				if status.Releases[i] != tt.want[i] {
+					t.Fatalf("Releases[%d] = %+v, want %+v", i, status.Releases[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestUpdateStatus(t *testing.T) {
 	t.Parallel()
 
@@ -495,6 +641,7 @@ func TestUpdateStatus(t *testing.T) {
 			if len(updated.Status.Releases) != tt.wantReleaseEntries {
 				t.Fatalf("len(Releases) = %d, want %d", len(updated.Status.Releases), tt.wantReleaseEntries)
 			}
+			assertPlatformHandshake(t, updated, "test-version")
 
 			assertConditionStatus(t, updated, string(common.ConditionTypeReady), tt.wantReady)
 			assertConditionStatus(t, updated, string(common.ConditionTypeProvisioningSucceeded), tt.wantProvisioned)
@@ -502,6 +649,26 @@ func TestUpdateStatus(t *testing.T) {
 			assertConditionStatus(t, updated, conditionTypeRootWebhookReady, tt.wantWebhookReady)
 		})
 	}
+}
+
+func assertPlatformHandshake(t *testing.T, instance *platformv1alpha1.OGX, version string) {
+	t.Helper()
+
+	if got := platformReleaseVersion(instance.Status.Releases); got != version {
+		t.Fatalf("status.releases[name=%q].version = %q, want %q", platformReleaseName, got, version)
+	}
+	if instance.Status.Distribution.Version != version {
+		t.Fatalf("Distribution.Version = %q, want %q", instance.Status.Distribution.Version, version)
+	}
+}
+
+func platformReleaseVersion(releases []common.ComponentRelease) string {
+	for _, release := range releases {
+		if release.Name == platformReleaseName {
+			return release.Version
+		}
+	}
+	return ""
 }
 
 func containsFinalizer(instance *platformv1alpha1.OGX, value string) bool {
