@@ -95,6 +95,7 @@ func LoadFromFS(fsys fs.FS) (*Config, error) {
 	// alias maps it to the canonical kebab-case key so it populates
 	// Config.PlatformVersion regardless of which key name was used.
 	v.RegisterAlias("platformversion", KeyPlatformVersion)
+	v.RegisterAlias("platformname", KeyPlatformName)
 
 	if fsys != nil {
 		if err := loadFromFS(v, fsys); err != nil {
@@ -175,11 +176,35 @@ func loadFromFS(v *viper.Viper, fsys fs.FS) error {
 		}
 	}
 
-	if err := v.MergeConfigMap(tmp.AllSettings()); err != nil {
+	if err := v.MergeConfigMap(canonicalizeSettings(tmp.AllSettings())); err != nil {
 		return fmt.Errorf("failed to merge config from filesystem: %w", err)
 	}
 
 	return nil
+}
+
+// canonicalizeSettings remaps ODH-injected camelCase ConfigMap keys onto the
+// kebab-case names used by Config. Viper aliases are not applied during
+// Unmarshal, so a projected file named "platformVersion" would otherwise
+// leave PlatformVersion at its default ("unknown").
+func canonicalizeSettings(settings map[string]any) map[string]any {
+	normalized := make(map[string]any, len(settings))
+	for key, value := range settings {
+		normalized[canonicalConfigKey(key)] = value
+	}
+
+	return normalized
+}
+
+func canonicalConfigKey(name string) string {
+	switch strings.ToLower(strings.ReplaceAll(name, "_", "-")) {
+	case "platformversion", KeyPlatformVersion:
+		return KeyPlatformVersion
+	case "platformname", KeyPlatformName:
+		return KeyPlatformName
+	default:
+		return name
+	}
 }
 
 func mergeStructuredFile(v *viper.Viper, name, ext string, data []byte) error {
