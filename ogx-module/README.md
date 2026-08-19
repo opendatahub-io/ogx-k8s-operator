@@ -217,6 +217,25 @@ Instead:
 6. OGX status reflects provisioning, readiness, degradation, and releases
 ```
 
+## Running e2e tests
+
+The module e2e suite lives in `tests/e2e/` and follows the same layout as the standalone operator suite: validation, creation, then deletion.
+
+It expects the module operator to already be running in the cluster. From the repository root:
+
+```bash
+make ogx-module-deploy OGX_MODULE_IMG=<module-image> OGX_K8S_OPERATOR_IMG=<root-operator-image>
+make test-ogx-module-e2e
+```
+
+The suite:
+
+1. Validates the `OGX` CRD and module operator deployment.
+2. Creates `default-ogx` and waits for the root `ogx-k8s-operator` deployment and status conditions to become ready.
+3. Sets `managementState: Removed`, verifies the root operator is cleaned up, then deletes the `OGX` CR.
+
+On vanilla Kubernetes the tests create a self-signed `ogx-k8s-operator-webhook-cert` secret so the root operator pod can start without OpenShift service-serving-cert injection.
+
 ## Directory layout
 
 ```text
@@ -227,5 +246,6 @@ ogx-module/
   config/
   docs/
   pkg/apis/v1alpha1/
+  tests/e2e/
   tests/scripts/
 ```

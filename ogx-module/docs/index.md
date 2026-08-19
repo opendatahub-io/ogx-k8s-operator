@@ -12,5 +12,6 @@ Current scope:
 - dedicated manager entrypoint: `[cmd/ogx-module/main.go](../cmd/ogx-module/main.go)`
 - initial ODH-facing `OGX` API: `[pkg/apis/v1alpha1](../pkg/apis/v1alpha1)`
 - placeholder config tree for module packaging: `[config](../config)`
+- e2e suite for the module operator: `[tests/e2e](../tests/e2e)`
 
 Later tasks add the reconciler, deployer, and vendorable manifests.

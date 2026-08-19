@@ -1,0 +1,144 @@
+name: Run OGX Module E2E Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ odh ]
+  workflow_call:
+    outputs:
+      success:
+        description: 'Whether the ogx-module e2e tests passed successfully'
+        value: ${{ jobs.ogx-module-e2e-tests.outputs.success }}
+      summary:
+        description: 'High-level summary of test results'
+        value: ${{ jobs.ogx-module-e2e-tests.outputs.summary }}
+      run_url:
+        description: 'URL to this workflow run for detailed logs'
+        value: ${{ jobs.ogx-module-e2e-tests.outputs.run_url }}
+
+jobs:
+  ogx-module-e2e-tests:
+    name: ogx-module-e2e-tests
+    runs-on: ubuntu-latest
+    outputs:
+      success: ${{ steps.test-results.outputs.success }}
+      summary: ${{ steps.test-results.outputs.summary }}
+      run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ogx-module/go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Create kind config
+        run: |
+          cat > kind-config.yaml << EOF
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          containerdConfigPatches:
+          - |-
+            [plugins."io.containerd.grpc.v1.cri".registry]
+              config_path = "/etc/containerd/certs.d"
+          nodes:
+          - role: control-plane
+            kubeadmConfigPatches:
+            - |
+              kind: InitConfiguration
+              nodeRegistration:
+                kubeletExtraArgs:
+                  system-reserved: memory=500Mi
+                  eviction-hard: memory.available<200Mi
+          EOF
+
+      - name: Create k8s Kind Cluster
+        id: kind
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          registry: true
+          registry_name: kind-registry
+          registry_port: 5000
+          registry_enable_delete: true
+          config: kind-config.yaml
+
+      - name: Build module operator image
+        run: |
+          docker build -t kind-registry:5000/odh-ogx-module-operator:run-${{ github.run_id }} -f ogx-module/Dockerfile .
+          docker tag kind-registry:5000/odh-ogx-module-operator:run-${{ github.run_id }} kind-registry:5000/odh-ogx-module-operator:latest
+
+      - name: Build root operator image
+        run: |
+          docker build -t kind-registry:5000/ogx-k8s-operator:run-${{ github.run_id }} -f Dockerfile .
+          docker tag kind-registry:5000/ogx-k8s-operator:run-${{ github.run_id }} kind-registry:5000/ogx-k8s-operator:latest
+
+      - name: Push images to local registry
+        run: |
+          echo '{"insecure-registries": ["kind-registry:5000"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          until docker exec kind-registry true 2>/dev/null; do sleep 1; done
+          docker push kind-registry:5000/odh-ogx-module-operator:latest
+          docker push kind-registry:5000/ogx-k8s-operator:latest
+
+      - name: Deploy ogx-module operator
+        run: |
+          make ogx-module-deploy \
+            OGX_MODULE_IMG=kind-registry:5000/odh-ogx-module-operator:latest \
+            OGX_K8S_OPERATOR_IMG=kind-registry:5000/ogx-k8s-operator:latest
+
+          if ! kubectl wait --for=condition=available --timeout=300s deployment/opendatahub-ogx-operator -n opendatahub-ogx-system; then
+            echo "Module operator deployment failed to become ready. Debugging information:"
+            kubectl describe deployment opendatahub-ogx-operator -n opendatahub-ogx-system
+            kubectl logs -l app.kubernetes.io/name=opendatahub-ogx-operator -n opendatahub-ogx-system --tail=100
+            kubectl get events -n opendatahub-ogx-system --sort-by='.lastTimestamp'
+            exit 1
+          fi
+
+      - name: Run ogx-module e2e tests
+        run: |
+          make test-ogx-module-e2e
+
+      - name: Set test results
+        id: test-results
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "summary=OGX module E2E tests passed successfully" >> $GITHUB_OUTPUT
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "summary=OGX module E2E tests failed - check logs for details" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get logs
+        if: ${{ always() }}
+        run: |
+          kubectl -n opendatahub-ogx-system get all -o yaml > module-all.log
+          kubectl -n opendatahub-ogx-system logs deployment.apps/opendatahub-ogx-operator > module-operator.log
+          kubectl -n opendatahub-ogx-system logs deployment.apps/opendatahub-ogx-operator --previous > module-operator-previous.log 2>/dev/null || true
+          kubectl -n opendatahub-ogx-system logs deployment.apps/ogx-k8s-operator-controller-manager > root-operator.log 2>/dev/null || true
+          kubectl -n opendatahub-ogx-system describe all > module-all-describe.log
+          kubectl -n opendatahub-ogx-system describe events > module-events.log
+          kubectl get ogxs -o yaml > ogxs.log
+          kubectl get ogxservers --all-namespaces -o yaml > ogxservers.log 2>/dev/null || true
+          echo "=== Module Operator Pod Status ===" > module-debug.log
+          kubectl -n opendatahub-ogx-system get pods -o wide >> module-debug.log 2>&1
+          echo "=== Module Operator Pod Describe ===" >> module-debug.log
+          kubectl -n opendatahub-ogx-system describe pods -l app.kubernetes.io/name=opendatahub-ogx-operator >> module-debug.log 2>&1
+          echo "=== Node Memory Pressure ===" >> module-debug.log
+          kubectl describe nodes | grep -A5 "MemoryPressure\|memory\|OOMKill" >> module-debug.log 2>&1
+          echo "=== Module Operator Events ===" >> module-debug.log
+          kubectl -n opendatahub-ogx-system get events --sort-by='.lastTimestamp' >> module-debug.log 2>&1
+
+      - name: Upload all logs to artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ogx-module-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            *.log
+          retention-days: 1

@@ -59,6 +59,8 @@ ENVTEST_K8S_VERSION = 1.31.0
 IMG_TAG ?= latest
 IMG ?= $(IMAGE_TAG_BASE):$(IMG_TAG)
 OGX_MODULE_IMG ?= quay.io/opendatahub/odh-ogx-module-operator:odh-stable
+# Optional runtime override for the root OGX operator image deployed by ogx-module.
+OGX_K8S_OPERATOR_IMG ?=
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -148,6 +150,10 @@ test: manifests generate fmt vet envtest ## Run tests. Use TEST_PKGS and TEST_FL
 test-e2e: ## Run e2e tests
 	./hack/deploy-quickstart.sh # Deploy Ollama for e2e tests
 	go test -v ./tests/e2e/ -run ^TestE2E -v ${E2E_TEST_FLAGS}
+
+.PHONY: test-ogx-module-e2e
+test-ogx-module-e2e: ## Run ogx-module e2e tests. Requires a cluster with the module operator already deployed.
+	cd ogx-module && go test -count=1 -v ./tests/e2e/ -run ^TestE2E ${E2E_TEST_FLAGS}
 
 GOLANGCI_LINT_TIMEOUT ?= 5m0s
 .PHONY: lint
@@ -323,6 +329,9 @@ deploy-openshift: manifests kustomize ## Deploy controller to an OpenShift clust
 ogx-module-deploy: kustomize ## Deploy the ogx-module operator from its default bundle.
 	@echo "RELATED_IMAGE_ODH_OGX_MODULE_OPERATOR_IMAGE=${OGX_MODULE_IMG}" > ogx-module/config/overlays/odh/params.env
 	$(KUSTOMIZE) build ogx-module/config/overlays/odh | kubectl apply -f -
+	@if [ -n "$(OGX_K8S_OPERATOR_IMG)" ]; then \
+		kubectl -n opendatahub-ogx-system set env deployment/opendatahub-ogx-operator RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE=$(OGX_K8S_OPERATOR_IMG); \
+	fi
 
 .PHONY: ogx-module-undeploy
 ogx-module-undeploy: kustomize ## Undeploy the ogx-module operator from the current cluster.
