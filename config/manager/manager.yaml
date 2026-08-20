@@ -55,8 +55,14 @@ spec:
         - name: GOMEMLIMIT
           value: "800MiB"
         - name: OPERATOR_VERSION
-          value: "latest"
-        - name: RELATED_IMAGE_ODH_OGX_CORE_IMAGE
+          value: "0.14.0"
+        - name: RELATED_IMAGE_STARTER
+          value: ""
+        - name: RELATED_IMAGE_REMOTE_VLLM
+          value: ""
+        - name: RELATED_IMAGE_META_REFERENCE_GPU
+          value: ""
+        - name: RELATED_IMAGE_POSTGRES_DEMO
           value: ""
         image: controller:latest
         imagePullPolicy: Always
