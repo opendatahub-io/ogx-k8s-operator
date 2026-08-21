@@ -7366,7 +7366,7 @@ spec:
           value: ""
         - name: RELATED_IMAGE_POSTGRES_DEMO
           value: ""
-        image: quay.io/ogx-ai/ogx-k8s-operator:v0.14.0
+        image: quay.io/ogx-ai/ogx-k8s-operator:latest
         imagePullPolicy: Always
         livenessProbe:
           httpGet:
