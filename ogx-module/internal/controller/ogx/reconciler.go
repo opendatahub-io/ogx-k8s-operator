@@ -66,10 +66,12 @@ const (
 )
 
 var (
-	deploymentGVK    = appsv1.SchemeGroupVersion.WithKind("Deployment")
-	crdGVK           = extv1.SchemeGroupVersion.WithKind("CustomResourceDefinition")
-	namespaceGVK     = corev1.SchemeGroupVersion.WithKind("Namespace")
-	ogxServerGVK     = schema.GroupVersionKind{Group: "ogx.io", Version: "v1beta1", Kind: "OGXServer"}
+	deploymentGVK     = appsv1.SchemeGroupVersion.WithKind("Deployment")
+	crdGVK            = extv1.SchemeGroupVersion.WithKind("CustomResourceDefinition")
+	namespaceGVK      = corev1.SchemeGroupVersion.WithKind("Namespace")
+	serviceMonitorGVK = schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor"}
+	prometheusRuleGVK = schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "PrometheusRule"}
+	ogxServerGVK      = schema.GroupVersionKind{Group: "ogx.io", Version: "v1beta1", Kind: "OGXServer"}
 	imageParamEnvMap = map[string][]string{
 		"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": {"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE"},
 		"RELATED_IMAGE_ODH_OGX_CORE_IMAGE":         {"RELATED_IMAGE_ODH_OGX_CORE_IMAGE"},
@@ -181,7 +183,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	rendered, err := r.renderRootOperatorResources()
+	rendered, err := r.renderRootOperatorResources(ctx)
 	if err != nil {
 		r.updateStatusOnError(ctx, instance, false, false, false, err, "failed to update status after render error")
 		return ctrl.Result{}, err
@@ -246,7 +248,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, nil
 }
 
-func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured, error) {
+func (r *Reconciler) renderRootOperatorResources(ctx context.Context) ([]unstructured.Unstructured, error) {
 	overlay := overlayForPlatform(r.Config.PlatformName)
 	componentRoot := filepath.Join(r.Config.ManifestsPath, componentName)
 	overlayPath := filepath.Join(componentRoot, overlay)
@@ -271,6 +273,11 @@ func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured,
 		return nil, fmt.Errorf("failed to render root operator manifests from %s: %w", overlayPath, err)
 	}
 
+	monitoringAvailable, err := monitoringCRDsAvailable(r.DiscoveryClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check monitoring CRD availability: %w", err)
+	}
+
 	filtered := make([]unstructured.Unstructured, 0, len(rendered))
 	for i := range rendered {
 		obj := *rendered[i].DeepCopy()
@@ -281,12 +288,47 @@ func (r *Reconciler) renderRootOperatorResources() ([]unstructured.Unstructured,
 			continue
 		case crdGVK:
 			obj.SetNamespace("")
+		case serviceMonitorGVK, prometheusRuleGVK:
+			if !monitoringAvailable {
+				continue
+			}
 		}
 
 		filtered = append(filtered, obj)
 	}
 
 	return filtered, nil
+}
+
+func monitoringCRDsAvailable(discoveryClient discovery.DiscoveryInterface) (bool, error) {
+	if discoveryClient == nil {
+		return false, nil
+	}
+
+	return monitoringCRDsAvailableViaDiscovery(discoveryClient)
+}
+
+func monitoringCRDsAvailableViaDiscovery(discoveryClient discovery.DiscoveryInterface) (bool, error) {
+	resources, err := discoveryClient.ServerResourcesForGroupVersion("monitoring.coreos.com/v1")
+	if err != nil {
+		if discovery.IsGroupDiscoveryFailedError(err) || apimeta.IsNoMatchError(err) || apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to discover monitoring.coreos.com/v1 resources: %w", err)
+	}
+
+	hasServiceMonitor := false
+	hasPrometheusRule := false
+	for _, resource := range resources.APIResources {
+		switch resource.Kind {
+		case "ServiceMonitor":
+			hasServiceMonitor = true
+		case "PrometheusRule":
+			hasPrometheusRule = true
+		}
+	}
+
+	return hasServiceMonitor && hasPrometheusRule, nil
 }
 
 func (r *Reconciler) cleanupRootOperatorResources(ctx context.Context, instance *platformv1alpha1.OGX) error {
