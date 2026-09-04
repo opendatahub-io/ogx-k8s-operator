@@ -327,6 +327,7 @@ deploy-openshift: manifests kustomize ## Deploy controller to an OpenShift clust
 
 .PHONY: ogx-module-deploy
 ogx-module-deploy: kustomize ## Deploy the ogx-module operator from its default bundle.
+	kubectl create namespace opendatahub-ogx-system --dry-run=client -o yaml | kubectl apply -f -
 	@echo "RELATED_IMAGE_ODH_OGX_MODULE_OPERATOR_IMAGE=${OGX_MODULE_IMG}" > ogx-module/config/overlays/odh/params.env
 	$(KUSTOMIZE) build ogx-module/config/overlays/odh | kubectl apply -f -
 	@if [ -n "$(OGX_K8S_OPERATOR_IMG)" ]; then \
