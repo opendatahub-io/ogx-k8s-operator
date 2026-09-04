@@ -74,6 +74,7 @@ func testCreateOGX(t *testing.T) *platformv1alpha1.OGX {
 	t.Helper()
 
 	ensureWebhookCertSecret(t, TestOpts.OperatorNS)
+	ensureMetricsCertSecret(t, TestOpts.OperatorNS)
 
 	instance := newManagedOGX()
 	t.Logf("Creating OGX %s", instance.Name)

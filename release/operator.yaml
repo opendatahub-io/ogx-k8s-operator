@@ -7017,14 +7017,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - config.openshift.io
-  resources:
-  - apiservers
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - monitoring.coreos.com
   resources:
   - prometheusrules
@@ -7398,6 +7390,7 @@ spec:
           capabilities:
             drop:
             - ALL
+          readOnlyRootFilesystem: true
         volumeMounts:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert

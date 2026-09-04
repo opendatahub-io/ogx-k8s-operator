@@ -38,6 +38,7 @@ const (
 	moduleDeploymentName       = "opendatahub-ogx-operator"
 	rootOperatorDeploymentName = "ogx-k8s-operator-controller-manager"
 	rootWebhookSecretName      = "ogx-k8s-operator-webhook-cert"
+	rootMetricsSecretName      = "ogx-k8s-operator-controller-manager-metrics-service-tls"
 	ogxCRDName                 = "ogxs.components.platform.opendatahub.io"
 	ogxServerCRDName           = "ogxservers.ogx.io"
 	ogxFinalizer               = "components.platform.opendatahub.io/ogx-finalizer"
@@ -318,13 +319,31 @@ func envValue(deployment *appsv1.Deployment, name string) string {
 
 func ensureWebhookCertSecret(t *testing.T, namespace string) {
 	t.Helper()
+	ensureTLSSecret(t, namespace, rootWebhookSecretName, []string{
+		"ogx-k8s-operator-webhook-service",
+		"ogx-k8s-operator-webhook-service." + namespace,
+		"ogx-k8s-operator-webhook-service." + namespace + ".svc",
+	})
+}
 
-	certPEM, keyPEM, err := generateSelfSignedCert(namespace)
-	require.NoError(t, err, "failed to generate webhook certificate")
+func ensureMetricsCertSecret(t *testing.T, namespace string) {
+	t.Helper()
+	ensureTLSSecret(t, namespace, rootMetricsSecretName, []string{
+		"ogx-k8s-operator-controller-manager-metrics-service",
+		"ogx-k8s-operator-controller-manager-metrics-service." + namespace,
+		"ogx-k8s-operator-controller-manager-metrics-service." + namespace + ".svc",
+	})
+}
+
+func ensureTLSSecret(t *testing.T, namespace, secretName string, dnsNames []string) {
+	t.Helper()
+
+	certPEM, keyPEM, err := generateSelfSignedCert(dnsNames)
+	require.NoError(t, err, "failed to generate TLS certificate for %s", secretName)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      rootWebhookSecretName,
+			Name:      secretName,
 			Namespace: namespace,
 		},
 		Type: corev1.SecretTypeTLS,
@@ -336,11 +355,11 @@ func ensureWebhookCertSecret(t *testing.T, namespace string) {
 
 	err = TestEnv.Client.Create(TestEnv.Ctx, secret)
 	if err != nil && !errors.IsAlreadyExists(err) {
-		require.NoError(t, err, "failed to create webhook certificate secret")
+		require.NoError(t, err, "failed to create TLS secret %s", secretName)
 	}
 }
 
-func generateSelfSignedCert(namespace string) ([]byte, []byte, error) {
+func generateSelfSignedCert(dnsNames []string) ([]byte, []byte, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate private key: %w", err)
@@ -351,16 +370,13 @@ func generateSelfSignedCert(namespace string) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
+	commonName := dnsNames[0]
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName: "ogx-k8s-operator-webhook-service",
+			CommonName: commonName,
 		},
-		DNSNames: []string{
-			"ogx-k8s-operator-webhook-service",
-			"ogx-k8s-operator-webhook-service." + namespace,
-			"ogx-k8s-operator-webhook-service." + namespace + ".svc",
-		},
+		DNSNames: dnsNames,
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,

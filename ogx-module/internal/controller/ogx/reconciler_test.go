@@ -905,3 +905,19 @@ func toAnySlice(items []map[string]any) []any {
 	}
 	return out
 }
+
+func TestMonitoringCRDsAvailable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil discovery client", func(t *testing.T) {
+		t.Parallel()
+
+		got, err := monitoringCRDsAvailable(nil)
+		if err != nil {
+			t.Fatalf("monitoringCRDsAvailable() error = %v", err)
+		}
+		if got {
+			t.Fatalf("monitoringCRDsAvailable() = %v, want false", got)
+		}
+	})
+}

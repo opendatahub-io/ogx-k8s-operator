@@ -51,6 +51,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
@@ -147,9 +148,19 @@ func setupHealthChecks(mgr ctrl.Manager) error {
 
 var errTLSProfileChanged = errors.New("TLS profile changed, restarting")
 
+func fetchAdherencePolicy(ctx context.Context, k8sClient client.Client) configv1.TLSAdherencePolicy {
+	adherence, err := tlspkg.FetchAPIServerTLSAdherencePolicy(ctx, k8sClient)
+	if err != nil {
+		setupLog.Info("Failed to fetch TLS adherence policy, defaulting to no opinion", "error", err)
+		return configv1.TLSAdherencePolicyNoOpinion
+	}
+	return adherence
+}
+
 type tlsSetupResult struct {
 	tlsOpts               []func(*tls.Config)
 	profile               configv1.TLSProfileSpec
+	adherencePolicy       configv1.TLSAdherencePolicy
 	hasOpenShiftConfigAPI bool
 }
 
@@ -191,6 +202,7 @@ func setupTLS(cfg *restclient.Config) (tlsSetupResult, error) {
 			return result, fmt.Errorf("failed to configure TLS: all %d ciphers in TLS profile are unsupported by Go", len(profile.Ciphers))
 		}
 		result.tlsOpts = append(result.tlsOpts, tlsConfigFn)
+		result.adherencePolicy = fetchAdherencePolicy(ctx, bootstrapClient)
 	}
 	result.tlsOpts = append(result.tlsOpts, func(c *tls.Config) {
 		c.NextProtos = []string{"h2", "http/1.1"}
@@ -202,8 +214,10 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	var metricsCertPath string
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8443", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&metricsCertPath, "metrics-cert-path", "", "The directory that contains the metrics server certificate and key.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -216,7 +230,7 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	if err := run(metricsAddr, probeAddr, enableLeaderElection); err != nil {
+	if err := run(metricsAddr, probeAddr, metricsCertPath, enableLeaderElection); err != nil {
 		setupLog.Error(err, "failed to run manager")
 		os.Exit(1)
 	}
@@ -248,7 +262,20 @@ func setupComponents(ctx context.Context, cfg *restclient.Config, mgr ctrl.Manag
 	return setupHealthChecks(mgr)
 }
 
-func run(metricsAddr, probeAddr string, enableLeaderElection bool) error {
+func buildMetricsOptions(addr, certPath string, tlsOpts []func(*tls.Config)) metricsserver.Options {
+	opts := metricsserver.Options{
+		BindAddress: addr,
+		TLSOpts:     tlsOpts,
+	}
+	if certPath != "" {
+		opts.SecureServing = true
+		opts.CertDir = certPath
+		opts.FilterProvider = filters.WithAuthenticationAndAuthorization
+	}
+	return opts
+}
+
+func run(metricsAddr, probeAddr, metricsCertPath string, enableLeaderElection bool) error {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
@@ -266,7 +293,7 @@ func run(metricsAddr, probeAddr string, enableLeaderElection bool) error {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                     scheme,
-		Metrics:                    metricsserver.Options{BindAddress: metricsAddr, TLSOpts: tlsResult.tlsOpts},
+		Metrics:                    buildMetricsOptions(metricsAddr, metricsCertPath, tlsResult.tlsOpts),
 		Cache:                      newCacheOptions(),
 		HealthProbeBindAddress:     probeAddr,
 		LeaderElection:             enableLeaderElection,
@@ -287,10 +314,15 @@ func run(metricsAddr, probeAddr string, enableLeaderElection bool) error {
 
 	if tlsResult.hasOpenShiftConfigAPI {
 		watcher := &tlspkg.SecurityProfileWatcher{
-			Client:                mgr.GetClient(),
-			InitialTLSProfileSpec: tlsResult.profile,
+			Client:                    mgr.GetClient(),
+			InitialTLSProfileSpec:     tlsResult.profile,
+			InitialTLSAdherencePolicy: tlsResult.adherencePolicy,
 			OnProfileChange: func(_ context.Context, _, _ configv1.TLSProfileSpec) {
 				setupLog.Info("TLS profile changed, initiating graceful shutdown to reload")
+				cancel()
+			},
+			OnAdherencePolicyChange: func(_ context.Context, _, newPolicy configv1.TLSAdherencePolicy) {
+				setupLog.Info("TLS adherence policy changed, initiating graceful shutdown to reload", "policy", newPolicy)
 				cancel()
 			},
 		}
