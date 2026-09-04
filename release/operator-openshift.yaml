@@ -7517,7 +7517,7 @@ kind: ServiceMonitor
 metadata:
   labels:
     control-plane: controller-manager
-  name: controller-manager-metrics-monitor
+  name: ogx-k8s-operator-controller-manager-metrics-monitor
   namespace: ogx-k8s-operator-system
 spec:
   endpoints:
