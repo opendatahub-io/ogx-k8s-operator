@@ -62,3 +62,7 @@ package controllers
 
 // CRD discovery - controller checks for monitoring.coreos.com CRD availability
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+
+// TLS profile discovery - operator reads the cluster APIServer resource at startup to
+// select a TLS profile, and exits if the read is denied
+//+kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch
