@@ -62,6 +62,8 @@ spec:
           value: ""
         - name: RELATED_IMAGE_META_REFERENCE_GPU
           value: ""
+        - name: RELATED_IMAGE_ODH_OGX_CORE_IMAGE
+          value: ""
         - name: RELATED_IMAGE_POSTGRES_DEMO
           value: ""
         image: controller:latest
