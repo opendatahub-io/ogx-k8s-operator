@@ -61,9 +61,16 @@ func (v *OGXServerValidator) ValidateCreate(_ context.Context, r *OGXServer) (ad
 }
 
 // ValidateUpdate implements admission.Validator.
-func (v *OGXServerValidator) ValidateUpdate(_ context.Context, _ *OGXServer, r *OGXServer) (admission.Warnings, error) {
-	ogxserverlog.Info("validating update", "name", r.Name)
-	return v.validate(r)
+func (v *OGXServerValidator) ValidateUpdate(_ context.Context, oldObj, newObj *OGXServer) (admission.Warnings, error) {
+	ogxserverlog.Info("validating update", "name", newObj.Name)
+	warnings, err := v.validate(newObj)
+	if isMigrationRequested(oldObj) && !isMigrationRequested(newObj) {
+		warnings = append(warnings,
+			"disabling Praxis migration is a soft rollback only: it restores the pre-enablement OGX "+
+				"Responses/Conversations serving posture. Writes made through Praxis after cutover do not "+
+				"flow back to OGX, ABAC flattening is not restored, and data loss is possible.")
+	}
+	return warnings, err
 }
 
 // ValidateDelete implements admission.Validator.
@@ -77,17 +84,91 @@ var DeprecatedDistributions = map[string]string{
 }
 
 func (v *OGXServerValidator) validate(r *OGXServer) (admission.Warnings, error) {
+	warnings := collectValidationWarnings(r)
+
 	allErrs := v.collectValidationErrors(r)
 	if len(allErrs) > 0 {
-		return nil, allErrs.ToAggregate()
+		return warnings, allErrs.ToAggregate()
 	}
 
-	var warnings admission.Warnings
 	if replacement, ok := DeprecatedDistributions[r.Spec.Distribution.Name]; ok {
 		warnings = append(warnings,
 			fmt.Sprintf("spec.distribution.name %q is deprecated, use %q instead", r.Spec.Distribution.Name, replacement))
 	}
 	return warnings, nil
+}
+
+// collectValidationWarnings returns non-fatal admission warnings. When an OGXServer opts into
+// Praxis-fronted mode (spec.praxisMode.enabled: true), OGX is internal-only, and has a Tech Preview
+// support level so this is surfaced as a warning. Two settings that would weaken the internal-only
+// guarantee are also surfaced as warnings rather than rejections (so existing CRs and GitOps applies
+// do not break): requesting external access (not honored — the operator creates no external exposure)
+// and disabling the operator-managed NetworkPolicy (which removes the mandatory Praxis ingress
+// lock-down).
+//
+// Warnings are emitted only when Praxis mode is enabled. When Praxis mode is disabled
+// or unset, these settings may be honored, so a warning would be misleading.
+func collectValidationWarnings(r *OGXServer) admission.Warnings {
+	// All warnings apply only in Praxis-fronted mode; in legacy mode these settings may be honored.
+	if !r.Spec.IsPraxisModeEnabled() {
+		return nil
+	}
+
+	warnings := admission.Warnings{
+		"Praxis mode is enabled (spec.praxisMode.enabled: true). The Responses API served by Praxis is Tech Preview.",
+	}
+
+	if isExternalAccessRequested(r) {
+		warnings = append(warnings,
+			"spec.network.externalAccess.enabled is not honored: OGX is internal-only (Praxis-fronted, "+
+				"spec.praxisMode.enabled: true) and the operator does not create external exposure. "+
+				"This value is treated as false.")
+	}
+
+	// In Praxis mode the NetworkPolicy enforces the mandatory ingress lock-down (Praxis pods plus
+	// the operator namespace). Setting spec.network.policy.enabled: false disables the policy
+	// entirely, removing that lock-down and leaving OGX reachable by any co-located workload.
+	if isNetworkPolicyDisabled(r) {
+		warnings = append(warnings,
+			"spec.network.policy.enabled: false disables the operator-managed NetworkPolicy entirely, "+
+				"removing the mandatory Praxis-fronted ingress lock-down (OGX is internal-only, "+
+				"spec.praxisMode.enabled: true). OGX may then be reachable directly by co-located "+
+				"workloads, bypassing Praxis. Prefer additive spec.network.policy.ingress rules instead.")
+	}
+
+	return warnings
+}
+
+// isPraxisModeEnabled reports whether spec.praxisMode.enabled is explicitly true.
+func isPraxisModeEnabled(r *OGXServer) bool {
+	return r.Spec.PraxisMode != nil &&
+		r.Spec.PraxisMode.Enabled != nil && *r.Spec.PraxisMode.Enabled
+}
+
+// isMigrationRequested reports whether the spec opts into the Praxis migration Job.
+func isMigrationRequested(r *OGXServer) bool {
+	if r == nil || !isPraxisModeEnabled(r) {
+		return false
+	}
+	mj := r.Spec.PraxisMode.MigrationJob
+	if mj == nil {
+		return false
+	}
+	return mj.Enabled == nil || *mj.Enabled
+}
+
+// isExternalAccessRequested reports whether spec.network.externalAccess.enabled is true.
+func isExternalAccessRequested(r *OGXServer) bool {
+	return r.Spec.Network != nil &&
+		r.Spec.Network.ExternalAccess != nil &&
+		r.Spec.Network.ExternalAccess.Enabled
+}
+
+// isNetworkPolicyDisabled reports whether spec.network.policy.enabled is explicitly false.
+func isNetworkPolicyDisabled(r *OGXServer) bool {
+	return r.Spec.Network != nil &&
+		r.Spec.Network.Policy != nil &&
+		r.Spec.Network.Policy.Enabled != nil && !*r.Spec.Network.Policy.Enabled
 }
 
 func (v *OGXServerValidator) collectValidationErrors(r *OGXServer) field.ErrorList {

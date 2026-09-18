@@ -98,8 +98,55 @@ func (r *OGXServerReconciler) buildIngress(
 	return ingress, nil
 }
 
-// reconcileIngress creates, updates, or deletes the Ingress based on expose setting.
+// reconcileIngress reconciles the Ingress according to the deployment mode. In Praxis mode OGX
+// is an internal backend reached only from Praxis, so external exposure is enforced off. In
+// legacy mode the Ingress is created/updated/deleted based on spec.network.externalAccess.
 func (r *OGXServerReconciler) reconcileIngress(
+	ctx context.Context,
+	instance *ogxiov1beta1.OGXServer,
+) error {
+	if instance.Spec.IsPraxisModeEnabled() {
+		return r.enforceInternalOnlyIngress(ctx, instance)
+	}
+	return r.reconcileLegacyIngress(ctx, instance)
+}
+
+// enforceInternalOnlyIngress removes any operator-owned Ingress for this instance. In the
+// Praxis-fronted topology OGX is reached only from Praxis, so the operator never creates
+// external exposure. The operator only ever created Ingress resources for external access
+// (there is no OpenShift Route or Gateway API HTTPRoute to remove).
+func (r *OGXServerReconciler) enforceInternalOnlyIngress(
+	ctx context.Context,
+	instance *ogxiov1beta1.OGXServer,
+) error {
+	logger := log.FromContext(ctx)
+	ingressName := instance.Name + IngressNameSuffix
+
+	existing := &networkingv1.Ingress{}
+	if err := r.Get(ctx, types.NamespacedName{Name: ingressName, Namespace: instance.Namespace}, existing); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to get Ingress: %w", err)
+	}
+
+	if !metav1.IsControlledBy(existing, instance) {
+		logger.V(1).Info("Ingress not owned by this instance, skipping deletion", "name", ingressName)
+		return nil
+	}
+
+	logger.Info("Deleting Ingress: OGX is internal-only (Praxis-fronted), external access is not exposed",
+		"name", ingressName)
+	if err := r.Delete(ctx, existing); err != nil && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete Ingress: %w", err)
+	}
+
+	return nil
+}
+
+// reconcileLegacyIngress creates, updates, or deletes the Ingress based on the expose setting
+// (pre-Praxis behavior).
+func (r *OGXServerReconciler) reconcileLegacyIngress(
 	ctx context.Context,
 	instance *ogxiov1beta1.OGXServer,
 ) error {
@@ -240,4 +287,9 @@ func (r *OGXServerReconciler) BuildIngressForTest(
 	instance *ogxiov1beta1.OGXServer,
 ) (*networkingv1.Ingress, error) {
 	return r.buildIngress(instance)
+}
+
+// ReconcileIngressForTest exposes reconcileIngress for unit testing.
+func (r *OGXServerReconciler) ReconcileIngressForTest(ctx context.Context, instance *ogxiov1beta1.OGXServer) error {
+	return r.reconcileIngress(ctx, instance)
 }

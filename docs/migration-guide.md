@@ -183,6 +183,46 @@ spec:
 
 To translate `enableNetworkPolicy: false` from the old ConfigMap, set `spec.network.policy.enabled: false` on the CR.
 
+#### Internal-only enforcement (Praxis-fronted)
+
+OGX is an **internal-only backend**: it is fronted by Praxis, which is the sole public
+entrypoint. The operator can enforce this via **Praxis-fronted mode** (`spec.praxisMode`, whose
+API is introduced by [#355](https://github.com/ogx-ai/ogx-k8s-operator/pull/355) / RHAIENG-7193).
+
+**Mode selection:** omit `spec.praxisMode` for legacy mode. When `spec.praxisMode` is provided,
+`enabled` defaults to `true`; set `spec.praxisMode.enabled: false` to force legacy mode.
+
+When Praxis mode is active, it is a **breaking change** relative to legacy behavior on clusters
+with a policy-enforcing CNI (OVN-Kubernetes / Calico):
+
+- The default NetworkPolicy ingress on port `8321` admits traffic **only** from the Praxis pods
+  identified by `spec.praxisMode.praxisSelector` (defaulting to label `app: payload-processing`)
+  and the operator namespace. The previous "allow all pods in the same namespace" and
+  OpenShift-router rules are removed. Co-located workloads that reached OGX directly will lose
+  access.
+- `spec.network.policy.ingress` rules are now **additive** — appended on top of the mandatory
+  Praxis + operator rules — and can no longer replace/remove them.
+- `spec.network.externalAccess.enabled: true` is **not honored**: it is treated as `false`
+  (surfaced as an admission warning, not a rejection), and any operator-created Ingress is
+  removed. `status.externalURL` is cleared; `status.serviceURL` continues to hold the internal
+  cluster DNS endpoint.
+- The **Responses API** is disabled in OGX's generated config (Praxis serves it). This is applied
+  internally during config generation and does **not** mutate your CR's `spec.disabledAPIs`.
+
+Escape hatches: set the Praxis selector per-CR via `spec.praxisMode.praxisSelector` (see the
+README); add per-CR additive `spec.network.policy.ingress` rules; or disable the policy entirely
+with `spec.network.policy.enabled: false`.
+
+> **Note (Praxis namespace):** the fail-safe default Praxis peer pins the `openshift-ingress`
+> namespace (where the PoC operator runs the Praxis/extproc servers). This is **provisional and
+> pending confirmation with the MaaS team**; if Praxis runs elsewhere, set the correct `namespace`
+> in `spec.praxisMode.praxisSelector`.
+
+> **Validated assumption (RHAISTRAT-2277):** OGX can be restricted to internal-only access via
+> NetworkPolicy without changes to the OGX Distribution (the Praxis selector is configured per-CR
+> via `spec.praxisMode.praxisSelector`). Enforcement is only effective on a policy-enforcing CNI;
+> on non-enforcing CNIs (e.g. kind's kindnet) the policy object exists but traffic is not blocked.
+
 ### ConfigMap/Secret Watch Labels and Namespace Scope
 
 All referenced ConfigMaps and Secrets must have the `ogx.io/watch: "true"` label, and must be in the same namespace as the OGXServer CR:

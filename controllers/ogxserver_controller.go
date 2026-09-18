@@ -46,6 +46,7 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -54,6 +55,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -93,12 +95,21 @@ const (
 	WatchLabelKey = "ogx.io/watch"
 	// WatchLabelValue is the expected value for the watch label.
 	WatchLabelValue = "true"
+
+	// migrationRequeueAfter is how often to requeue while a migration Job is active.
+	migrationRequeueAfter = 15 * time.Second
 )
 
 // OGXServerReconciler reconciles an OGXServer object.
 type OGXServerReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	// APIReader is a non-cached reader used for direct API reads (e.g. listing Praxis pods,
+	// which are not cached by the operator). When nil, reads fall back to the cached Client.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	// Recorder emits Kubernetes events for migration and other lifecycle transitions.
+	// Optional; when nil, event emission is skipped.
+	Recorder events.EventRecorder
 	// Image mapping overrides
 	ImageMappingOverrides map[string]string
 	// Cluster info
@@ -176,6 +187,9 @@ func (r *OGXServerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Check if requeue is needed based on phase
 	if instance.Status.Phase == ogxiov1beta1.OGXServerPhaseInitializing {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+	if migrationNeedsRequeue(instance) {
+		return ctrl.Result{RequeueAfter: migrationRequeueAfter}, nil
 	}
 
 	logger.Info("Successfully reconciled OGXServer")
@@ -573,6 +587,8 @@ func (r *OGXServerReconciler) buildManifestContext(
 		PodSpec:                 podSpecMap,
 		PodDisruptionBudgetSpec: buildPodDisruptionBudgetSpec(instance),
 		HPASpec:                 buildHPASpec(instance),
+		PraxisPeer:              BuildPraxisPeer(instance),
+		PraxisMode:              instance.Spec.IsPraxisModeEnabled(),
 	}, nil
 }
 
@@ -691,6 +707,10 @@ func (r *OGXServerReconciler) reconcileResources(ctx context.Context, instance *
 	// gaps during the migration-off path.
 	if err := r.cleanupAdoptedNetworking(ctx, instance); err != nil {
 		return fmt.Errorf("failed to clean up adopted networking: %w", err)
+	}
+
+	if err := r.reconcileMigration(ctx, instance, runtimeConfig); err != nil {
+		return fmt.Errorf("failed to reconcile Praxis migration: %w", err)
 	}
 
 	return nil
@@ -815,6 +835,13 @@ func (r *OGXServerReconciler) reconcileManagedCABundle(ctx context.Context, inst
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OGXServerReconciler) SetupWithManager(_ context.Context, mgr ctrl.Manager) error {
+	// Use the manager's non-cached reader for direct API reads (Praxis pods are not cached).
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorder("ogxserver-controller")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ogxiov1beta1.OGXServer{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: r.ogxServerUpdatePredicate(mgr),
@@ -824,6 +851,7 @@ func (r *OGXServerReconciler) SetupWithManager(_ context.Context, mgr ctrl.Manag
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&batchv1.Job{}).
 		Watches(
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.mapConfigMapToReconcileRequests),
@@ -1015,6 +1043,13 @@ func (r *OGXServerReconciler) instanceReferencesSecret(instance *ogxiov1beta1.OG
 		}
 	}
 
+	if instance.Spec.PraxisMode != nil && instance.Spec.PraxisMode.MigrationJob != nil {
+		mj := instance.Spec.PraxisMode.MigrationJob
+		if mj.TargetConnectionString != nil && mj.TargetConnectionString.Name == secretName {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -1184,6 +1219,13 @@ func (r *OGXServerReconciler) updateStatus(ctx context.Context, instance *ogxiov
 		r.updateServiceStatus(ctx, instance)
 		r.updateDistributionConfig(instance)
 
+		// In Praxis-fronted mode, surface preflight readiness (Praxis reachability, TLS secret)
+		// as status conditions. OGX and Praxis deploy independently, so unmet preconditions are
+		// reported rather than rejected.
+		if instance.Spec.IsPraxisModeEnabled() {
+			r.updatePraxisPreflightStatus(ctx, instance)
+		}
+
 		if deploymentReady {
 			instance.Status.Phase = ogxiov1beta1.OGXServerPhaseReady
 
@@ -1297,12 +1339,19 @@ func (r *OGXServerReconciler) updateServiceStatus(ctx context.Context, instance 
 		return
 	}
 
-	// Set the service URL in the status
+	// Set the internal service URL in the status. This is the stable endpoint Praxis and
+	// the platform use to reach OGX.
 	serviceURL := r.getServerURL(instance, "")
 	instance.Status.ServiceURL = serviceURL.String()
 
-	// Set the external URL if external access is enabled
-	instance.Status.ExternalURL = r.getIngressURL(ctx, instance)
+	if instance.Spec.IsPraxisModeEnabled() {
+		// OGX is internal-only (Praxis-fronted): no external exposure is created, so the
+		// external URL is always cleared.
+		instance.Status.ExternalURL = nil
+	} else {
+		// Legacy mode: reflect any operator-created external exposure.
+		instance.Status.ExternalURL = r.getIngressURL(ctx, instance)
+	}
 
 	SetServiceReadyCondition(&instance.Status, true, MessageServiceReady)
 }
@@ -1923,6 +1972,47 @@ func ParseImageMappingOverrides(ctx context.Context, configMapData map[string]st
 	}
 
 	return imageMappingOverrides
+}
+
+// BuildPraxisPeer returns the NetworkPolicy ingress peer identifying the Praxis instance that
+// fronts this OGXServer. When spec.praxisMode.praxisSelector is set it is honored (the selector's
+// namespace is matched via the well-known kubernetes.io/metadata.name label); otherwise the
+// fail-safe default peer is returned. It never returns nil. The praxisSelector's pod selector is
+// CEL-validated non-empty (see api/v1beta1), so this never produces an allow-all peer.
+func BuildPraxisPeer(instance *ogxiov1beta1.OGXServer) *networkingv1.NetworkPolicyPeer {
+	if instance.Spec.PraxisMode == nil || instance.Spec.PraxisMode.PraxisSelector == nil {
+		return defaultPraxisPeer()
+	}
+
+	sel := instance.Spec.PraxisMode.PraxisSelector
+	podSelector := sel.PodSelector
+	return &networkingv1.NetworkPolicyPeer{
+		PodSelector: &podSelector,
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				ogxiov1beta1.DefaultNamespaceNameLabel: sel.Namespace,
+			},
+		},
+	}
+}
+
+// defaultPraxisPeer returns the fail-safe Praxis NetworkPolicy ingress peer: pods labeled
+// app: payload-processing in the openshift-ingress namespace. It is used when a CR does not set
+// spec.praxisMode.praxisSelector, and is never an allow-all peer. The namespace is provisional
+// (see ogxiov1beta1.DefaultPraxisNamespace) and can be overridden per-CR via praxisSelector.
+func defaultPraxisPeer() *networkingv1.NetworkPolicyPeer {
+	return &networkingv1.NetworkPolicyPeer{
+		PodSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				ogxiov1beta1.DefaultLabelKey: ogxiov1beta1.DefaultPraxisPodLabelValue,
+			},
+		},
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				ogxiov1beta1.DefaultNamespaceNameLabel: ogxiov1beta1.DefaultPraxisNamespace,
+			},
+		},
+	}
 }
 
 // NewTestReconciler creates a reconciler for testing, allowing injection of a custom http client.

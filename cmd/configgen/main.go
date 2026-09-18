@@ -80,7 +80,8 @@ func run(opts options) (*config.GeneratedConfig, error) {
 	if server.HasOverrideConfig() {
 		return nil, errors.New("failed to generate config: CR has overrideConfig set; the operator would skip config generation and use the override ConfigMap directly")
 	}
-	if !server.HasDeclarativeConfig() {
+
+	if !server.HasDeclarativeConfig() && !server.Spec.IsPraxisModeEnabled() {
 		return nil, errors.New("failed to generate config: CR has no declarative config fields (providers, resources, storage, or disabledAPIs); nothing to generate")
 	}
 
@@ -99,7 +100,10 @@ func run(opts options) (*config.GeneratedConfig, error) {
 		return nil, fmt.Errorf("failed to validate secret ref env var names: %w", err)
 	}
 
-	return config.GenerateConfig(&server.Spec, baseConfigData)
+	if server.HasDeclarativeConfig() {
+		return config.GenerateConfig(&server.Spec, baseConfigData, server.Spec.IsPraxisModeEnabled())
+	}
+	return config.GeneratePraxisDefaultConfig(&server.Spec, baseConfigData)
 }
 
 type options struct {

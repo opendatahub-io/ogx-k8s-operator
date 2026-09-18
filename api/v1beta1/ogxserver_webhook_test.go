@@ -1007,3 +1007,306 @@ func TestValidateExternalAccess(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_ExternalAccessWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name                string
+		network             *NetworkSpec
+		praxisMode          *PraxisModeSpec
+		wantExternalWarning bool
+	}{
+		{
+			name:                "no network spec: no external access warning",
+			network:             nil,
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: false,
+		},
+		{
+			name:                "external access disabled: no external access warning",
+			network:             &NetworkSpec{ExternalAccess: &ExternalAccessConfig{Enabled: false}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: false,
+		},
+		{
+			name: "external access enabled + praxis mode enabled: warns but does not reject",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: true,
+		},
+		{
+			name: "external access enabled + praxisMode unset: no warning (legacy)",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          nil,
+			wantExternalWarning: false,
+		},
+		{
+			name: "external access enabled + praxis mode disabled: no warning (legacy honors it)",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(false)},
+			wantExternalWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network:      tt.network,
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "externalAccess")
+			if got != tt.wantExternalWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantExternalWarning %v", warnings, tt.wantExternalWarning)
+			}
+		})
+	}
+}
+
+func TestValidate_PolicyDisabledWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name              string
+		network           *NetworkSpec
+		praxisMode        *PraxisModeSpec
+		wantPolicyWarning bool
+	}{
+		{
+			name:              "no network spec: no policy warning",
+			network:           nil,
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy enabled + praxis mode enabled: no policy warning",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(true)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy unset + praxis mode enabled: no policy warning",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy disabled + praxis mode enabled: warns but does not reject",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: true,
+		},
+		{
+			name:              "policy disabled + praxisMode unset: no warning (legacy)",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        nil,
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy disabled + praxis mode disabled: no warning (legacy)",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(false)},
+			wantPolicyWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network:      tt.network,
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "spec.network.policy.enabled")
+			if got != tt.wantPolicyWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantPolicyWarning %v", warnings, tt.wantPolicyWarning)
+			}
+		})
+	}
+}
+
+func TestValidate_PraxisModeWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name        string
+		praxisMode  *PraxisModeSpec
+		wantWarning bool
+	}{
+		{
+			name:        "praxis mode enabled",
+			praxisMode:  &PraxisModeSpec{Enabled: ptr(true)},
+			wantWarning: true,
+		},
+		{
+			name:        "praxis mode with enabled omitted",
+			praxisMode:  &PraxisModeSpec{},
+			wantWarning: true,
+		},
+		{
+			name:        "praxis mode unset",
+			praxisMode:  nil,
+			wantWarning: false,
+		},
+		{
+			name:        "praxis mode disabled",
+			praxisMode:  &PraxisModeSpec{Enabled: ptr(false)},
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "Praxis mode is enabled (spec.praxisMode.enabled: true). The Responses API served by Praxis is Tech Preview.")
+			if got != tt.wantWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantTechPreviewWarning %v", warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestValidateUpdate_SoftRollbackWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	migrationJob := &MigrationJobSpec{
+		Enabled: ptr(true),
+		TargetConnectionString: &SecretKeyRef{
+			Name: "praxis-pg",
+			Key:  "url",
+		},
+	}
+	requested := &OGXServer{
+		Spec: OGXServerSpec{
+			Distribution: DistributionSpec{Name: "starter"},
+			PraxisMode: &PraxisModeSpec{
+				Enabled:      ptr(true),
+				MigrationJob: migrationJob,
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		oldObj      *OGXServer
+		newObj      *OGXServer
+		wantWarning bool
+	}{
+		{
+			name:        "unchanged requested spec does not warn",
+			oldObj:      requested,
+			newObj:      requested,
+			wantWarning: false,
+		},
+		{
+			name:   "praxisMode.enabled true to false warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode: &PraxisModeSpec{
+						Enabled:      ptr(false),
+						MigrationJob: migrationJob,
+					},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name:   "migrationJob.enabled true to false warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode: &PraxisModeSpec{
+						Enabled: ptr(true),
+						MigrationJob: &MigrationJobSpec{
+							Enabled:                ptr(false),
+							TargetConnectionString: migrationJob.TargetConnectionString,
+						},
+					},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name:   "removing migrationJob warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(true)},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name: "never requested does not warn",
+			oldObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(true)},
+				},
+			},
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(false)},
+				},
+			},
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := v.ValidateUpdate(t.Context(), tt.oldObj, tt.newObj)
+			if err != nil {
+				t.Fatalf("ValidateUpdate returned unexpected error: %v", err)
+			}
+			got := false
+			for _, w := range warnings {
+				if strings.Contains(w, "soft rollback") {
+					got = true
+				}
+			}
+			if got != tt.wantWarning {
+				t.Errorf("ValidateUpdate rollback warning = %v, wantWarning %v; warnings=%v", got, tt.wantWarning, warnings)
+			}
+		})
+	}
+}
