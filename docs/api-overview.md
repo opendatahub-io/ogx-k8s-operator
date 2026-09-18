@@ -534,7 +534,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether external access is created. | false |  |
-| `hostname` _string_ | Hostname sets a custom hostname for the external endpoint.<br />When omitted, an auto-generated hostname is used. |  |  |
+| `hostname` _string_ | Hostname sets the hostname for the external endpoint.<br />Required when external access is enabled for TLS SNI routing. |  |  |
+| `tls` _[TLSSpec](#tlsspec)_ | TLS configures TLS for the external Ingress. Required when external access<br />is enabled. The referenced Secret must contain a valid TLS certificate for<br />the specified hostname. |  |  |
 
 #### FileProcessorChunkConfig
 
@@ -791,6 +792,57 @@ _Appears in:_
 | `endpoint` _string_ | Endpoint is the Redis endpoint URL. Required when type is "redis". |  |  |
 | `password` _[SecretKeyRef](#secretkeyref)_ | Password references a Secret for Redis authentication.<br />The Secret must be in the same namespace as the OGXServer<br />and must have the label ogx.io/watch: "true". |  |  |
 
+#### MigrationJobSpec
+
+MigrationJobSpec configures the Job that migrates OGX data to Praxis.
+Migration is opt-in: the Job is created only when praxisMode is enabled and
+this field is set. Only Responses and Conversations (plus conversation items)
+are migrated; Files/Vector Stores/ingestion remain OGX-owned.
+
+_Appears in:_
+- [PraxisModeSpec](#praxismodespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled controls whether the DB migration job is enabled.<br />Defaults to true when migrationJob is present. | true |  |
+| `targetConnectionString` _[SecretKeyRef](#secretkeyref)_ | TargetConnectionString references a Secret containing the PostgreSQL<br />connection string that the migration Job writes to (PRAXIS_DATABASE_URL).<br />Required when migrationJob is set. Must point at the Praxis database, not<br />the OGX source: both default schemas include openai_conversations.<br />The Secret must be in the same namespace as the OGXServer<br />and must have the label ogx.io/watch: "true". |  | Required: \{\} <br /> |
+
+#### MigrationPhase
+
+_Underlying type:_ _string_
+
+MigrationPhase is the operator-observed phase of Praxis migration orchestration.
+
+_Validation:_
+- Enum: [Pending PreflightFailed Running Failed Validated]
+
+_Appears in:_
+- [MigrationStatus](#migrationstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` | MigrationPhasePending indicates migration has not started or is not opted in.<br /> |
+| `PreflightFailed` | MigrationPhasePreflightFailed indicates preflight checks failed.<br /> |
+| `Running` | MigrationPhaseRunning indicates the migration Job is active.<br /> |
+| `Failed` | MigrationPhaseFailed indicates the migration Job failed.<br /> |
+| `Validated` | MigrationPhaseValidated indicates the migration Job completed.<br /> |
+
+#### MigrationStatus
+
+MigrationStatus tracks operator-managed Praxis migration progress.
+
+_Appears in:_
+- [OGXServerStatus](#ogxserverstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[MigrationPhase](#migrationphase)_ | Phase is the high-level migration orchestration phase. |  | Enum: [Pending PreflightFailed Running Failed Validated] <br /> |
+| `observedGeneration` _integer_ | ObservedGeneration is the OGXServer generation last considered for migration. |  |  |
+| `attemptKey` _string_ | AttemptKey identifies the current migration attempt (Secret/config/image fingerprint). |  |  |
+| `jobName` _string_ | JobName is the Kubernetes Job created for this attempt. |  |  |
+| `message` _string_ | Message is a human-readable summary of the current migration state. |  |  |
+| `softRollbackWarning` _string_ | SoftRollbackWarning warns that only soft rollback is supported. |  |  |
+
 #### MilvusProvider
 
 MilvusProvider configures a remote::milvus vector I/O provider instance.
@@ -847,15 +899,12 @@ _Appears in:_
 
 NetworkPolicySpec configures the operator-managed NetworkPolicy for this server.
 
-Ingress is always enforced unless explicitly omitted from policyTypes.
-The operator always includes default ingress rules (allow from same-namespace
-and operator-namespace on the service port), merging them with any
-user-specified rules.
+The operator always enforces a mandatory ingress lock-down: OGX accepts traffic on the
+service port only from Praxis pods (the internal API front-end) plus the operator
+namespace (control-plane status polling). These mandatory rules cannot be removed via this
+spec; set Enabled=false to disable the NetworkPolicy entirely as an escape hatch.
 
-Egress is unrestricted by default. It is only enforced when egress rules
-are provided or "Egress" is explicitly included in policyTypes.
-When any egress rules are configured, or when "Egress" is explicitly included in
-policyTypes, a kube-dns egress rule is auto-injected to prevent DNS breakage.
+Egress is unrestricted by default. It is only enforced when egress rules are provided.
 
 _Appears in:_
 - [NetworkSpec](#networkspec)
@@ -864,7 +913,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled controls whether the operator manages a NetworkPolicy for this server.<br />Defaults to true. Set to false to disable NetworkPolicy creation entirely. | true |  |
 | `policyTypes` _[PolicyType](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#policytype-v1-networking) array_ | PolicyTypes specifies which policy directions are enforced.<br />Follows Kubernetes NetworkPolicy semantics: when omitted or empty,<br />Ingress is always included and Egress is included only if egress<br />rules are provided. |  | items:Enum: [Ingress Egress] <br /> |
-| `ingress` _[NetworkPolicyIngressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#networkpolicyingressrule-v1-networking) array_ | Ingress defines additional ingress rules, merged with operator defaults<br />(allow from same-namespace and operator-namespace on the service port). |  |  |
+| `ingress` _[NetworkPolicyIngressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#networkpolicyingressrule-v1-networking) array_ | Ingress defines additional ingress rules, appended to the mandatory operator rules<br />(allow from Praxis pods and the operator namespace on the service port). User rules<br />are additive and cannot remove the mandatory Praxis lock-down. |  |  |
 | `egress` _[NetworkPolicyEgressRule](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#networkpolicyegressrule-v1-networking) array_ | Egress rules. When non-empty, a kube-dns egress rule is auto-injected<br />to prevent DNS breakage. |  |  |
 
 #### NetworkSpec
@@ -944,7 +993,7 @@ _Appears in:_
 | `providers` _[ProvidersSpec](#providersspec)_ | Providers configures providers by API type.<br />Mutually exclusive with overrideConfig. |  |  |
 | `resources` _[ResourcesSpec](#resourcesspec)_ | Resources declares models to register.<br />Mutually exclusive with overrideConfig. |  |  |
 | `storage` _[StateStorageSpec](#statestoragespec)_ | Storage configures state storage backends (KV and SQL).<br />Mutually exclusive with overrideConfig. |  |  |
-| `disabledAPIs` _string array_ | DisabledAPIs lists API names to remove from the generated config.<br />Mutually exclusive with overrideConfig. |  | MaxItems: 7 <br />MinItems: 1 <br />items:Enum: [batches file_processors inference responses tool_runtime vector_io files] <br /> |
+| `disabledAPIs` _string array_ | DisabledAPIs lists API names to remove from the generated config.<br />Mutually exclusive with overrideConfig. |  | MaxItems: 8 <br />MinItems: 1 <br />items:Enum: [batches conversations file_processors inference responses tool_runtime vector_io files] <br /> |
 | `registryRefreshIntervalSeconds` _integer_ | RegistryRefreshIntervalSeconds configures how often the server refreshes<br />its model registry, in seconds. When omitted, the server's built-in<br />default is used. |  | Minimum: 1 <br /> |
 | `network` _[NetworkSpec](#networkspec)_ | Network defines network access controls. |  |  |
 | `tls` _[TLSClientConfig](#tlsclientconfig)_ | TLS configures outbound TLS trust anchors and client identity for<br />connections to providers and backends. |  |  |
@@ -952,6 +1001,7 @@ _Appears in:_
 | `monitoring` _[MonitoringSpec](#monitoringspec)_ | Monitoring configures Prometheus monitoring and observability. |  |  |
 | `baseConfig` _[ConfigMapKeyRef](#configmapkeyref)_ | BaseConfig references a ConfigMap key containing the base config.yaml used<br />as the starting point for declarative config generation.<br />When set, this takes precedence over OCI label resolution.<br />Mutually exclusive with overrideConfig.<br />The ConfigMap must be in the same namespace as the OGXServer<br />and must have the label ogx.io/watch: "true". |  |  |
 | `overrideConfig` _[ConfigMapKeyRef](#configmapkeyref)_ | OverrideConfig references a ConfigMap key containing a full config.yaml override.<br />Mutually exclusive with providers, resources, storage, disabledAPIs, and baseConfig.<br />The ConfigMap must be in the same namespace as the OGXServer<br />and must have the label ogx.io/watch: "true". |  |  |
+| `praxisMode` _[PraxisModeSpec](#praxismodespec)_ | PraxisMode configures integration with an existing Praxis instance<br />that acts as gateway for this OGX server. |  |  |
 
 #### OGXServerStatus
 
@@ -967,6 +1017,7 @@ _Appears in:_
 | `distributionConfig` _[DistributionConfig](#distributionconfig)_ | DistributionConfig contains provider information from the running server. |  |  |
 | `resolvedDistribution` _[ResolvedDistributionStatus](#resolveddistributionstatus)_ | ResolvedDistribution tracks the resolved image and config source. |  |  |
 | `configGeneration` _[ConfigGenerationStatus](#configgenerationstatus)_ | ConfigGeneration tracks config generation details. |  |  |
+| `migration` _[MigrationStatus](#migrationstatus)_ | Migration tracks Praxis Responses/Conversations migration orchestration. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#condition-v1-meta) array_ | Conditions represent the latest available observations of the server's state. |  |  |
 | `availableReplicas` _integer_ | AvailableReplicas is the number of available replicas. |  |  |
 | `serviceURL` _string_ | ServiceURL is the internal Kubernetes service URL. |  |  |
@@ -1029,6 +1080,32 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `minAvailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#intorstring-intstr-util)_ | MinAvailable is the minimum number of pods that must remain available. |  |  |
 | `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of pods that can be disrupted simultaneously. |  |  |
+
+#### PraxisModeSpec
+
+PraxisMode configures integration with an existing Praxis instance that
+acts as gateway for this OGX server.
+
+_Appears in:_
+- [OGXServerSpec](#ogxserverspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled controls whether Praxis mode is enabled.<br />Defaults to true when PraxisMode is provided. | true |  |
+| `praxisSelector` _[PraxisSelector](#praxisselector)_ | PraxisSelector identifies the Praxis instance that is the gateway to the OGX server.<br />Defaults to the cluster's default Praxis instance if omitted. |  |  |
+| `migrationJob` _[MigrationJobSpec](#migrationjobspec)_ | MigrationJob configures the DB migration Job that migrates OGX data to Praxis.<br />When omitted the Job is not created. |  |  |
+
+#### PraxisSelector
+
+PraxisSelector identifies the target Praxis instance by namespace and Pod label selector.
+
+_Appears in:_
+- [PraxisModeSpec](#praxismodespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace is the namespace of the Praxis instance. |  | MinLength: 1 <br /> |
+| `podSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#labelselector-v1-meta)_ | PodSelector selects the Praxis Pods by label. |  |  |
 
 #### ProviderHealthStatus
 
@@ -1267,6 +1344,7 @@ _Appears in:_
 - [DoclingServeProvider](#doclingserveprovider)
 - [IdentityConfig](#identityconfig)
 - [KVStorageSpec](#kvstoragespec)
+- [MigrationJobSpec](#migrationjobspec)
 - [MilvusProvider](#milvusprovider)
 - [OpenAIProvider](#openaiprovider)
 - [PgvectorProvider](#pgvectorprovider)
@@ -1324,6 +1402,7 @@ _Appears in:_
 TLSSpec defines TLS termination configuration for the server.
 
 _Appears in:_
+- [ExternalAccessConfig](#externalaccessconfig)
 - [NetworkSpec](#networkspec)
 
 | Field | Description | Default | Validation |

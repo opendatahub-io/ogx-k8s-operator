@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 	ogxiov1beta1 "github.com/ogx-ai/ogx-k8s-operator/api/v1beta1"
 	controllers "github.com/ogx-ai/ogx-k8s-operator/controllers"
 	"github.com/ogx-ai/ogx-k8s-operator/pkg/cluster"
+	"github.com/ogx-ai/ogx-k8s-operator/pkg/config"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -100,6 +102,12 @@ func (b *OGXServerBuilder) WithDistribution(distributionName string) *OGXServerB
 	return b
 }
 
+// WithPraxisMode sets spec.praxisMode.enabled explicitly.
+func (b *OGXServerBuilder) WithPraxisMode(enabled bool) *OGXServerBuilder {
+	b.instance.Spec.PraxisMode = &ogxiov1beta1.PraxisModeSpec{Enabled: &enabled}
+	return b
+}
+
 func (b *OGXServerBuilder) WithResources(resources corev1.ResourceRequirements) *OGXServerBuilder {
 	if b.instance.Spec.Workload == nil {
 		b.instance.Spec.Workload = &ogxiov1beta1.WorkloadSpec{}
@@ -121,6 +129,16 @@ func (b *OGXServerBuilder) WithServiceAccountName(serviceAccountName string) *OG
 
 func (b *OGXServerBuilder) WithOverrideConfig(configMapName, key string) *OGXServerBuilder {
 	b.instance.Spec.OverrideConfig = &ogxiov1beta1.ConfigMapKeyRef{
+		Name: configMapName,
+		Key:  key,
+	}
+	return b
+}
+
+// WithBaseConfig points spec.baseConfig at a ConfigMap. Unlike WithOverrideConfig this keeps the
+// config-generation pipeline in play, while avoiding the OCI-label fetch that envtest cannot do.
+func (b *OGXServerBuilder) WithBaseConfig(configMapName, key string) *OGXServerBuilder {
+	b.instance.Spec.BaseConfig = &ogxiov1beta1.ConfigMapKeyRef{
 		Name: configMapName,
 		Key:  key,
 	}
@@ -368,12 +386,13 @@ func AssertNetworkPolicyAllowsDeploymentPort(t *testing.T, networkPolicy *networ
 	require.NotEmpty(t, deployment.Spec.Template.Spec.Containers[0].Ports, "Container should have at least one port")
 	containerPort := deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort
 
-	sameNamespacePredicate := func(peer networkingv1.NetworkPolicyPeer) bool {
-		return peer.PodSelector != nil && len(peer.PodSelector.MatchLabels) == 0 && peer.NamespaceSelector == nil
+	praxisPredicate := func(peer networkingv1.NetworkPolicyPeer) bool {
+		return peer.PodSelector != nil &&
+			peer.PodSelector.MatchLabels[ogxiov1beta1.DefaultLabelKey] == ogxiov1beta1.DefaultPraxisPodLabelValue
 	}
 	require.True(t,
-		hasMatchingIngressRule(t, networkPolicy, containerPort, sameNamespacePredicate),
-		"NetworkPolicy is missing a rule to allow traffic from all pods in the same namespace on port %d", containerPort)
+		hasMatchingIngressRule(t, networkPolicy, containerPort, praxisPredicate),
+		"NetworkPolicy is missing a rule to allow traffic from Praxis pods on port %d", containerPort)
 
 	operatorPredicate := func(peer networkingv1.NetworkPolicyPeer) bool {
 		return peer.NamespaceSelector != nil && peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == operatorNamespace
@@ -381,6 +400,14 @@ func AssertNetworkPolicyAllowsDeploymentPort(t *testing.T, networkPolicy *networ
 	require.True(t,
 		hasMatchingIngressRule(t, networkPolicy, containerPort, operatorPredicate),
 		"NetworkPolicy is missing a rule to allow traffic from the operator in namespace '%s' on port %d", operatorNamespace, containerPort)
+
+	sameNamespacePredicate := func(peer networkingv1.NetworkPolicyPeer) bool {
+		return peer.PodSelector != nil && len(peer.PodSelector.MatchLabels) == 0 &&
+			len(peer.PodSelector.MatchExpressions) == 0 && peer.NamespaceSelector == nil
+	}
+	require.False(t,
+		hasMatchingIngressRule(t, networkPolicy, containerPort, sameNamespacePredicate),
+		"NetworkPolicy must NOT allow traffic from all pods in the same namespace on port %d", containerPort)
 }
 
 func AssertNetworkPolicyIsIngressOnly(t *testing.T, networkPolicy *networkingv1.NetworkPolicy) {
@@ -427,7 +454,31 @@ func createTestReconciler() *controllers.OGXServerReconciler {
 			"starter": testImage,
 		},
 	}
-	return controllers.NewTestReconciler(k8sClient, scheme.Scheme, clusterInfo, &http.Client{})
+	reconciler := controllers.NewTestReconciler(k8sClient, scheme.Scheme, clusterInfo, &http.Client{})
+	reconciler.OCILabelFetcher = stubOCILabelFetcher
+	return reconciler
+}
+
+// testDistributionBaseConfig is the distribution default that stubOCILabelFetcher serves. It
+// declares responses so the Praxis API filter has something to remove, and inference so a filtered
+// list is distinguishable from an emptied one.
+const testDistributionBaseConfig = `version: '2'
+apis:
+- inference
+- responses
+server:
+  port: 8321
+`
+
+// stubOCILabelFetcher stands in for a container registry: a greenfield CR carries only
+// spec.distribution, so the config generator resolves its base config from the distribution
+// image's OCI labels, which envtest has no registry to serve. Everything downstream of the fetch —
+// resolver, generator, ConfigMap plumbing — still runs for real.
+func stubOCILabelFetcher(string) (map[string]string, error) {
+	return map[string]string{
+		config.OCIDefaultConfigLabel:                "config.yaml",
+		config.OCIConfigLabelPrefix + "config.yaml": base64.StdEncoding.EncodeToString([]byte(testDistributionBaseConfig)),
+	}, nil
 }
 
 func findVolumeByName(t *testing.T, deployment *appsv1.Deployment, volumeName string) *corev1.Volume {

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -146,6 +147,206 @@ func assertSliceEqual(t *testing.T, got, want []string) {
 		if got[i] != want[i] {
 			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestValidateVolumeTypes(t *testing.T) {
+	tests := []struct {
+		name      string
+		server    *OGXServer
+		wantErrs  int
+		errSubstr string
+	}{
+		{
+			name: "nil workload is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{Distribution: DistributionSpec{Image: "x"}},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "nil overrides is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload:     &WorkloadSpec{},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "configMap volume is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "cfg",
+							VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "secret volume is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "sec",
+							VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "emptyDir volume is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "tmp",
+							VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "persistentVolumeClaim is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "data",
+							VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "c"}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "projected volume is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "proj",
+							VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "downwardAPI volume is allowed",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "dapi",
+							VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{}},
+						}},
+					}},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "hostPath volume is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "bad",
+							VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}},
+						}},
+					}},
+				},
+			},
+			wantErrs:  1,
+			errSubstr: "disallowed volume source type",
+		},
+		{
+			name: "nfs volume is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{{
+							Name:         "nfs",
+							VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "s", Path: "/"}},
+						}},
+					}},
+				},
+			},
+			wantErrs:  1,
+			errSubstr: "disallowed volume source type",
+		},
+		{
+			name: "mixed allowed and disallowed volumes",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{
+							{Name: "ok", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+							{Name: "bad", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}},
+						},
+					}},
+				},
+			},
+			wantErrs: 1,
+		},
+		{
+			name: "multiple disallowed volumes",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Workload: &WorkloadSpec{Overrides: &WorkloadOverrides{
+						Volumes: []corev1.Volume{
+							{Name: "hp", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}}},
+							{Name: "nfs", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "s", Path: "/"}}},
+						},
+					}},
+				},
+			},
+			wantErrs: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateVolumeTypes(tt.server)
+			if len(errs) != tt.wantErrs {
+				t.Errorf("validateVolumeTypes() returned %d errors, want %d: %v", len(errs), tt.wantErrs, errs)
+			}
+			if tt.errSubstr != "" && len(errs) > 0 {
+				found := false
+				for _, e := range errs {
+					if strings.Contains(e.Detail, tt.errSubstr) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("no error contains %q; errors: %v", tt.errSubstr, errs)
+				}
+			}
+		})
 	}
 }
 
@@ -636,6 +837,54 @@ func TestCollectValidationErrors(t *testing.T) {
 			},
 			wantErrs: 1,
 		},
+		{
+			name: "hostPath volume is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Workload: &WorkloadSpec{
+						Overrides: &WorkloadOverrides{
+							Volumes: []corev1.Volume{{
+								Name:         "bad",
+								VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/"}},
+							}},
+						},
+					},
+				},
+			},
+			wantErrs: 1,
+		},
+		{
+			name: "external access enabled without TLS is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{
+							Enabled:  true,
+							Hostname: "ogx.example.com",
+						},
+					},
+				},
+			},
+			wantErrs: 1,
+		},
+		{
+			name: "external access with TLS and hostname is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{
+							Enabled:  true,
+							Hostname: "ogx.example.com",
+							TLS:      &TLSSpec{SecretName: "ogx-tls"},
+						},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -644,6 +893,419 @@ func TestCollectValidationErrors(t *testing.T) {
 			errs := v.collectValidationErrors(tt.server)
 			if len(errs) != tt.wantErrs {
 				t.Errorf("collectValidationErrors() returned %d errors, want %d: %v", len(errs), tt.wantErrs, errs)
+			}
+		})
+	}
+}
+
+func TestValidateExternalAccess(t *testing.T) {
+	tests := []struct {
+		name      string
+		server    *OGXServer
+		wantErrs  int
+		errSubstr string
+	}{
+		{
+			name: "nil network is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{Distribution: DistributionSpec{Image: "x"}},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "disabled external access without TLS is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{Enabled: false},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "enabled with TLS and hostname is valid",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{
+							Enabled:  true,
+							Hostname: "ogx.example.com",
+							TLS:      &TLSSpec{SecretName: "ogx-tls"},
+						},
+					},
+				},
+			},
+			wantErrs: 0,
+		},
+		{
+			name: "enabled without TLS is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{
+							Enabled:  true,
+							Hostname: "ogx.example.com",
+						},
+					},
+				},
+			},
+			wantErrs:  1,
+			errSubstr: "TLS secretName is required",
+		},
+		{
+			name: "enabled without hostname is rejected",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{
+							Enabled: true,
+							TLS:     &TLSSpec{SecretName: "ogx-tls"},
+						},
+					},
+				},
+			},
+			wantErrs:  1,
+			errSubstr: "hostname is required",
+		},
+		{
+			name: "enabled without hostname or TLS gives two errors",
+			server: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Image: "x"},
+					Network: &NetworkSpec{
+						ExternalAccess: &ExternalAccessConfig{Enabled: true},
+					},
+				},
+			},
+			wantErrs: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errs := validateExternalAccess(tt.server)
+			if len(errs) != tt.wantErrs {
+				t.Errorf("validateExternalAccess() returned %d errors, want %d: %v", len(errs), tt.wantErrs, errs)
+			}
+			if tt.errSubstr != "" && len(errs) > 0 {
+				found := false
+				for _, e := range errs {
+					if strings.Contains(e.Detail, tt.errSubstr) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("no error contains %q; errors: %v", tt.errSubstr, errs)
+				}
+			}
+		})
+	}
+}
+
+func TestValidate_ExternalAccessWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name                string
+		network             *NetworkSpec
+		praxisMode          *PraxisModeSpec
+		wantExternalWarning bool
+	}{
+		{
+			name:                "no network spec: no external access warning",
+			network:             nil,
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: false,
+		},
+		{
+			name:                "external access disabled: no external access warning",
+			network:             &NetworkSpec{ExternalAccess: &ExternalAccessConfig{Enabled: false}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: false,
+		},
+		{
+			name: "external access enabled + praxis mode enabled: warns but does not reject",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(true)},
+			wantExternalWarning: true,
+		},
+		{
+			name: "external access enabled + praxisMode unset: no warning (legacy)",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          nil,
+			wantExternalWarning: false,
+		},
+		{
+			name: "external access enabled + praxis mode disabled: no warning (legacy honors it)",
+			network: &NetworkSpec{ExternalAccess: &ExternalAccessConfig{
+				Enabled: true, Hostname: "ogx.example.com", TLS: &TLSSpec{SecretName: "ogx-tls"},
+			}},
+			praxisMode:          &PraxisModeSpec{Enabled: ptr(false)},
+			wantExternalWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network:      tt.network,
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "externalAccess")
+			if got != tt.wantExternalWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantExternalWarning %v", warnings, tt.wantExternalWarning)
+			}
+		})
+	}
+}
+
+func TestValidate_PolicyDisabledWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name              string
+		network           *NetworkSpec
+		praxisMode        *PraxisModeSpec
+		wantPolicyWarning bool
+	}{
+		{
+			name:              "no network spec: no policy warning",
+			network:           nil,
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy enabled + praxis mode enabled: no policy warning",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(true)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy unset + praxis mode enabled: no policy warning",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy disabled + praxis mode enabled: warns but does not reject",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(true)},
+			wantPolicyWarning: true,
+		},
+		{
+			name:              "policy disabled + praxisMode unset: no warning (legacy)",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        nil,
+			wantPolicyWarning: false,
+		},
+		{
+			name:              "policy disabled + praxis mode disabled: no warning (legacy)",
+			network:           &NetworkSpec{Policy: &NetworkPolicySpec{Enabled: ptr(false)}},
+			praxisMode:        &PraxisModeSpec{Enabled: ptr(false)},
+			wantPolicyWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					Network:      tt.network,
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "spec.network.policy.enabled")
+			if got != tt.wantPolicyWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantPolicyWarning %v", warnings, tt.wantPolicyWarning)
+			}
+		})
+	}
+}
+
+func TestValidate_PraxisModeWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	tests := []struct {
+		name        string
+		praxisMode  *PraxisModeSpec
+		wantWarning bool
+	}{
+		{
+			name:        "praxis mode enabled",
+			praxisMode:  &PraxisModeSpec{Enabled: ptr(true)},
+			wantWarning: true,
+		},
+		{
+			name:        "praxis mode with enabled omitted",
+			praxisMode:  &PraxisModeSpec{},
+			wantWarning: true,
+		},
+		{
+			name:        "praxis mode unset",
+			praxisMode:  nil,
+			wantWarning: false,
+		},
+		{
+			name:        "praxis mode disabled",
+			praxisMode:  &PraxisModeSpec{Enabled: ptr(false)},
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   tt.praxisMode,
+				},
+			}
+
+			warnings, err := v.ValidateCreate(t.Context(), server)
+			if err != nil {
+				t.Fatalf("ValidateCreate returned unexpected error: %v", err)
+			}
+
+			got := strings.Contains(strings.Join(warnings, " "), "Praxis mode is enabled (spec.praxisMode.enabled: true). The Responses API served by Praxis is Tech Preview.")
+			if got != tt.wantWarning {
+				t.Errorf("ValidateCreate warnings = %v, wantTechPreviewWarning %v", warnings, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestValidateUpdate_SoftRollbackWarning(t *testing.T) {
+	v := &OGXServerValidator{KnownDistributionNames: []string{"starter"}}
+
+	migrationJob := &MigrationJobSpec{
+		Enabled: ptr(true),
+		TargetConnectionString: &SecretKeyRef{
+			Name: "praxis-pg",
+			Key:  "url",
+		},
+	}
+	requested := &OGXServer{
+		Spec: OGXServerSpec{
+			Distribution: DistributionSpec{Name: "starter"},
+			PraxisMode: &PraxisModeSpec{
+				Enabled:      ptr(true),
+				MigrationJob: migrationJob,
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		oldObj      *OGXServer
+		newObj      *OGXServer
+		wantWarning bool
+	}{
+		{
+			name:        "unchanged requested spec does not warn",
+			oldObj:      requested,
+			newObj:      requested,
+			wantWarning: false,
+		},
+		{
+			name:   "praxisMode.enabled true to false warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode: &PraxisModeSpec{
+						Enabled:      ptr(false),
+						MigrationJob: migrationJob,
+					},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name:   "migrationJob.enabled true to false warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode: &PraxisModeSpec{
+						Enabled: ptr(true),
+						MigrationJob: &MigrationJobSpec{
+							Enabled:                ptr(false),
+							TargetConnectionString: migrationJob.TargetConnectionString,
+						},
+					},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name:   "removing migrationJob warns",
+			oldObj: requested,
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(true)},
+				},
+			},
+			wantWarning: true,
+		},
+		{
+			name: "never requested does not warn",
+			oldObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(true)},
+				},
+			},
+			newObj: &OGXServer{
+				Spec: OGXServerSpec{
+					Distribution: DistributionSpec{Name: "starter"},
+					PraxisMode:   &PraxisModeSpec{Enabled: ptr(false)},
+				},
+			},
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			warnings, err := v.ValidateUpdate(t.Context(), tt.oldObj, tt.newObj)
+			if err != nil {
+				t.Fatalf("ValidateUpdate returned unexpected error: %v", err)
+			}
+			got := false
+			for _, w := range warnings {
+				if strings.Contains(w, "soft rollback") {
+					got = true
+				}
+			}
+			if got != tt.wantWarning {
+				t.Errorf("ValidateUpdate rollback warning = %v, wantWarning %v; warnings=%v", got, tt.wantWarning, warnings)
 			}
 		})
 	}

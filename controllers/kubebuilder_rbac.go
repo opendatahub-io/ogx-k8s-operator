@@ -27,7 +27,7 @@ package controllers
 //+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 //+kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,verbs=use
-//+kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=anyuid,verbs=use
+//+kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=nonroot-v2,verbs=use
 
 //+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch
 
@@ -46,6 +46,13 @@ package controllers
 // PodDisruptionBudget permissions - controller creates and manages voluntary disruption controls
 //+kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
+// Job permissions - controller creates and tracks Praxis migration Jobs
+//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get
+
+// Event permissions - controller emits migration progress/failure events
+//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+
 // HorizontalPodAutoscaler permissions - controller creates and manages HPAs for server pods
 //+kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
@@ -55,3 +62,7 @@ package controllers
 
 // CRD discovery - controller checks for monitoring.coreos.com CRD availability
 //+kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
+
+// TLS profile discovery - operator reads the cluster APIServer resource at startup to
+// select a TLS profile, and exits if the read is denied
+//+kubebuilder:rbac:groups=config.openshift.io,resources=apiservers,verbs=get;list;watch

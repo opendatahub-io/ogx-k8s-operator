@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -538,6 +539,70 @@ func TestCEL_PodDisruptionBudgetSpec(t *testing.T) {
 	}
 }
 
+func TestCEL_PraxisSelector(t *testing.T) {
+	ns := createCELTestNamespace(t, "cel-praxis")
+
+	tests := []struct {
+		name      string
+		mutate    func(*OGXServer)
+		wantError string
+	}{
+		{
+			name: "matchLabels only is valid",
+			mutate: func(o *OGXServer) {
+				o.Spec.PraxisMode = &PraxisModeSpec{
+					PraxisSelector: &PraxisSelector{
+						Namespace:   "praxis",
+						PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{"app": "praxis"}},
+					},
+				}
+			},
+		},
+		{
+			name: "matchExpressions only is valid",
+			mutate: func(o *OGXServer) {
+				o.Spec.PraxisMode = &PraxisModeSpec{
+					PraxisSelector: &PraxisSelector{
+						Namespace: "praxis",
+						PodSelector: metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{{
+							Key:      "app",
+							Operator: metav1.LabelSelectorOpExists,
+						}}},
+					},
+				}
+			},
+		},
+		{
+			name: "empty podSelector is invalid with the intended message",
+			mutate: func(o *OGXServer) {
+				o.Spec.PraxisMode = &PraxisModeSpec{
+					PraxisSelector: &PraxisSelector{
+						Namespace:   "praxis",
+						PodSelector: metav1.LabelSelector{},
+					},
+				}
+			},
+			wantError: "podSelector must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := validOGXServer(uniqueName(), ns)
+			tt.mutate(obj)
+			err := k8sClient.Create(context.Background(), obj)
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("expected success, got: %v", err)
+				}
+				t.Cleanup(func() { _ = k8sClient.Delete(context.Background(), obj) })
+			} else {
+				requireCELError(t, err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestCEL_AutoscalingSpec(t *testing.T) {
 	ns := createCELTestNamespace(t, "cel-hpa")
 
@@ -809,15 +874,27 @@ func TestCEL_ExternalAccessConfig(t *testing.T) {
 		wantError string
 	}{
 		{
-			name: "hostname absent is valid",
+			name: "disabled without TLS is valid",
 			mutate: func(o *OGXServer) {
 				o.Spec.Network = &NetworkSpec{
-					ExternalAccess: &ExternalAccessConfig{Enabled: true},
+					ExternalAccess: &ExternalAccessConfig{Enabled: false},
 				}
 			},
 		},
 		{
-			name: "hostname set is valid",
+			name: "enabled with hostname and TLS is valid",
+			mutate: func(o *OGXServer) {
+				o.Spec.Network = &NetworkSpec{
+					ExternalAccess: &ExternalAccessConfig{
+						Enabled:  true,
+						Hostname: "example.com",
+						TLS:      &TLSSpec{SecretName: "my-tls"},
+					},
+				}
+			},
+		},
+		{
+			name: "enabled without TLS is rejected",
 			mutate: func(o *OGXServer) {
 				o.Spec.Network = &NetworkSpec{
 					ExternalAccess: &ExternalAccessConfig{
@@ -826,6 +903,19 @@ func TestCEL_ExternalAccessConfig(t *testing.T) {
 					},
 				}
 			},
+			wantError: "tls is required when external access is enabled",
+		},
+		{
+			name: "enabled without hostname is rejected",
+			mutate: func(o *OGXServer) {
+				o.Spec.Network = &NetworkSpec{
+					ExternalAccess: &ExternalAccessConfig{
+						Enabled: true,
+						TLS:     &TLSSpec{SecretName: "my-tls"},
+					},
+				}
+			},
+			wantError: "hostname is required when external access is enabled",
 		},
 	}
 

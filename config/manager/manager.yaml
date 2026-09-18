@@ -55,7 +55,7 @@ spec:
         - name: GOMEMLIMIT
           value: "800MiB"
         - name: OPERATOR_VERSION
-          value: "0.14.0"
+          value: "0.15.0"
         - name: RELATED_IMAGE_STARTER
           value: ""
         - name: RELATED_IMAGE_REMOTE_VLLM
@@ -71,7 +71,6 @@ spec:
         name: manager
         securityContext:
           allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
           capabilities:
             drop:
             - "ALL"

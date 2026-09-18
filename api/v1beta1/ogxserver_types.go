@@ -41,6 +41,20 @@ const (
 	DefaultLabelKey = "app"
 	// DefaultLabelValue is the default value for labels.
 	DefaultLabelValue = "ogx"
+	// DefaultPraxisPodLabelValue is the value of the "app" label identifying Praxis
+	// (MaaS Gateway) pods. Praxis is the only application workload permitted to reach
+	// OGX; this value is used as the fail-safe NetworkPolicy ingress peer when a CR's
+	// spec.praxisMode.praxisSelector is not set.
+	DefaultPraxisPodLabelValue = "payload-processing"
+	// DefaultPraxisNamespace is the namespace Praxis (MaaS) pods run in by default. The PoC
+	// operator places the extproc/Praxis servers in openshift-ingress, so the fail-safe
+	// NetworkPolicy peer pins its namespaceSelector to this namespace. This is provisional and
+	// pending confirmation with the MaaS team; override it per-CR via
+	// spec.praxisMode.praxisSelector if Praxis runs elsewhere.
+	DefaultPraxisNamespace = "openshift-ingress"
+	// DefaultNamespaceNameLabel is the well-known Kubernetes label the API server sets on every
+	// namespace to its own name; it is used to select a namespace by name in a NetworkPolicy peer.
+	DefaultNamespaceNameLabel = "kubernetes.io/metadata.name"
 	// DefaultMountPath is the default mount path for storage.
 	DefaultMountPath = "/.ogx"
 	// OGXServerKind is the kind name for OGXServer resources.
@@ -247,15 +261,12 @@ type TLSClientConfig struct {
 
 // NetworkPolicySpec configures the operator-managed NetworkPolicy for this server.
 //
-// Ingress is always enforced unless explicitly omitted from policyTypes.
-// The operator always includes default ingress rules (allow from same-namespace
-// and operator-namespace on the service port), merging them with any
-// user-specified rules.
+// The operator always enforces a mandatory ingress lock-down: OGX accepts traffic on the
+// service port only from Praxis pods (the internal API front-end) plus the operator
+// namespace (control-plane status polling). These mandatory rules cannot be removed via this
+// spec; set Enabled=false to disable the NetworkPolicy entirely as an escape hatch.
 //
-// Egress is unrestricted by default. It is only enforced when egress rules
-// are provided or "Egress" is explicitly included in policyTypes.
-// When any egress rules are configured, or when "Egress" is explicitly included in
-// policyTypes, a kube-dns egress rule is auto-injected to prevent DNS breakage.
+// Egress is unrestricted by default. It is only enforced when egress rules are provided.
 type NetworkPolicySpec struct {
 	// Enabled controls whether the operator manages a NetworkPolicy for this server.
 	// Defaults to true. Set to false to disable NetworkPolicy creation entirely.
@@ -269,8 +280,9 @@ type NetworkPolicySpec struct {
 	// +optional
 	// +kubebuilder:validation:items:Enum=Ingress;Egress
 	PolicyTypes []networkingv1.PolicyType `json:"policyTypes,omitempty"`
-	// Ingress defines additional ingress rules, merged with operator defaults
-	// (allow from same-namespace and operator-namespace on the service port).
+	// Ingress defines additional ingress rules, appended to the mandatory operator rules
+	// (allow from Praxis pods and the operator namespace on the service port). User rules
+	// are additive and cannot remove the mandatory Praxis lock-down.
 	// +optional
 	Ingress []networkingv1.NetworkPolicyIngressRule `json:"ingress,omitempty"`
 	// Egress rules. When non-empty, a kube-dns egress rule is auto-injected
@@ -281,15 +293,22 @@ type NetworkPolicySpec struct {
 
 // ExternalAccessConfig controls external service exposure.
 // +kubebuilder:validation:XValidation:rule="!has(self.hostname) || self.hostname.size() > 0",message="hostname must not be empty if specified"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.tls)",message="tls is required when external access is enabled"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.hostname)",message="hostname is required when external access is enabled"
 type ExternalAccessConfig struct {
 	// Enabled controls whether external access is created.
 	// +optional
 	// +kubebuilder:default:=false
 	Enabled bool `json:"enabled,omitempty"`
-	// Hostname sets a custom hostname for the external endpoint.
-	// When omitted, an auto-generated hostname is used.
+	// Hostname sets the hostname for the external endpoint.
+	// Required when external access is enabled for TLS SNI routing.
 	// +optional
 	Hostname string `json:"hostname,omitempty"`
+	// TLS configures TLS for the external Ingress. Required when external access
+	// is enabled. The referenced Secret must contain a valid TLS certificate for
+	// the specified hostname.
+	// +optional
+	TLS *TLSSpec `json:"tls,omitempty"`
 }
 
 // NetworkSpec defines network access controls for the OGXServer.
@@ -448,6 +467,59 @@ type WorkloadSpec struct {
 	Overrides *WorkloadOverrides `json:"overrides,omitempty"`
 }
 
+// PraxisSelector identifies the target Praxis instance by namespace and Pod label selector.
+// +kubebuilder:validation:XValidation:rule="(has(self.podSelector.matchLabels) && size(self.podSelector.matchLabels) > 0) || (has(self.podSelector.matchExpressions) && size(self.podSelector.matchExpressions) > 0)",message="podSelector must not be empty"
+//
+//nolint:lll // kubebuilder markers cannot be split across lines.
+type PraxisSelector struct {
+	// Namespace is the namespace of the Praxis instance.
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+	// PodSelector selects the Praxis Pods by label.
+	PodSelector metav1.LabelSelector `json:"podSelector"`
+}
+
+// MigrationJobSpec configures the Job that migrates OGX data to Praxis.
+// Migration is opt-in: the Job is created only when praxisMode is enabled and
+// this field is set. Only Responses and Conversations (plus conversation items)
+// are migrated; Files/Vector Stores/ingestion remain OGX-owned.
+type MigrationJobSpec struct {
+	// Enabled controls whether the DB migration job is enabled.
+	// Defaults to true when migrationJob is present.
+	// +optional
+	// +kubebuilder:default:=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// TargetConnectionString references a Secret containing the PostgreSQL
+	// connection string that the migration Job writes to (PRAXIS_DATABASE_URL).
+	// Required when migrationJob is set. Must point at the Praxis database, not
+	// the OGX source: both default schemas include openai_conversations.
+	// The Secret must be in the same namespace as the OGXServer
+	// and must have the label ogx.io/watch: "true".
+	// +kubebuilder:validation:Required
+	TargetConnectionString *SecretKeyRef `json:"targetConnectionString"`
+}
+
+// PraxisMode configures integration with an existing Praxis instance that
+// acts as gateway for this OGX server.
+type PraxisModeSpec struct {
+	// Enabled controls whether Praxis mode is enabled.
+	// Defaults to true when PraxisMode is provided.
+	// +optional
+	// +kubebuilder:default:=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// PraxisSelector identifies the Praxis instance that is the gateway to the OGX server.
+	// Defaults to the cluster's default Praxis instance if omitted.
+	// +optional
+	PraxisSelector *PraxisSelector `json:"praxisSelector,omitempty"`
+
+	// MigrationJob configures the DB migration Job that migrates OGX data to Praxis.
+	// When omitted the Job is not created.
+	// +optional
+	MigrationJob *MigrationJobSpec `json:"migrationJob,omitempty"`
+}
+
 // OGXServerSpec defines the desired state of OGXServer.
 // +kubebuilder:validation:XValidation:rule="!has(self.overrideConfig) || !has(self.providers)",message="overrideConfig and providers are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!has(self.overrideConfig) || !has(self.resources)",message="overrideConfig and resources are mutually exclusive"
@@ -483,8 +555,8 @@ type OGXServerSpec struct {
 	// Mutually exclusive with overrideConfig.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=7
-	// +kubebuilder:validation:items:Enum=batches;file_processors;inference;responses;tool_runtime;vector_io;files
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:Enum=batches;conversations;file_processors;inference;responses;tool_runtime;vector_io;files
 	DisabledAPIs []string `json:"disabledAPIs,omitempty"`
 	// RegistryRefreshIntervalSeconds configures how often the server refreshes
 	// its model registry, in seconds. When omitted, the server's built-in
@@ -519,6 +591,19 @@ type OGXServerSpec struct {
 	// and must have the label ogx.io/watch: "true".
 	// +optional
 	OverrideConfig *ConfigMapKeyRef `json:"overrideConfig,omitempty"`
+
+	// PraxisMode configures integration with an existing Praxis instance
+	// that acts as gateway for this OGX server.
+	// +optional
+	PraxisMode *PraxisModeSpec `json:"praxisMode,omitempty"`
+}
+
+// IsPraxisModeEnabled reports the effective Praxis mode for the spec. When
+// spec.praxisMode is provided, the CRD defaults enabled to true; an explicit
+// false selects legacy mode. An omitted spec.praxisMode selects legacy mode.
+func (s *OGXServerSpec) IsPraxisModeEnabled() bool {
+	return s != nil && s.PraxisMode != nil &&
+		(s.PraxisMode.Enabled == nil || *s.PraxisMode.Enabled)
 }
 
 // OGXServerPhase represents the current phase of the OGXServer.
@@ -588,6 +673,45 @@ type ConfigGenerationStatus struct {
 	ConfigVersion int `json:"configVersion,omitempty"`
 }
 
+// MigrationPhase is the operator-observed phase of Praxis migration orchestration.
+// +kubebuilder:validation:Enum=Pending;PreflightFailed;Running;Failed;Validated
+type MigrationPhase string
+
+const (
+	// MigrationPhasePending indicates migration has not started or is not opted in.
+	MigrationPhasePending MigrationPhase = "Pending"
+	// MigrationPhasePreflightFailed indicates preflight checks failed.
+	MigrationPhasePreflightFailed MigrationPhase = "PreflightFailed"
+	// MigrationPhaseRunning indicates the migration Job is active.
+	MigrationPhaseRunning MigrationPhase = "Running"
+	// MigrationPhaseFailed indicates the migration Job failed.
+	MigrationPhaseFailed MigrationPhase = "Failed"
+	// MigrationPhaseValidated indicates the migration Job completed.
+	MigrationPhaseValidated MigrationPhase = "Validated"
+)
+
+// MigrationStatus tracks operator-managed Praxis migration progress.
+type MigrationStatus struct {
+	// Phase is the high-level migration orchestration phase.
+	// +optional
+	Phase MigrationPhase `json:"phase,omitempty"`
+	// ObservedGeneration is the OGXServer generation last considered for migration.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// AttemptKey identifies the current migration attempt (Secret/config/image fingerprint).
+	// +optional
+	AttemptKey string `json:"attemptKey,omitempty"`
+	// JobName is the Kubernetes Job created for this attempt.
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+	// Message is a human-readable summary of the current migration state.
+	// +optional
+	Message string `json:"message,omitempty"`
+	// SoftRollbackWarning warns that only soft rollback is supported.
+	// +optional
+	SoftRollbackWarning string `json:"softRollbackWarning,omitempty"`
+}
+
 // OGXServerStatus defines the observed state of OGXServer.
 type OGXServerStatus struct {
 	// Phase represents the current phase of the server.
@@ -602,6 +726,9 @@ type OGXServerStatus struct {
 	// ConfigGeneration tracks config generation details.
 	// +optional
 	ConfigGeneration *ConfigGenerationStatus `json:"configGeneration,omitempty"`
+	// Migration tracks Praxis Responses/Conversations migration orchestration.
+	// +optional
+	Migration *MigrationStatus `json:"migration,omitempty"`
 	// Conditions represent the latest available observations of the server's state.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// AvailableReplicas is the number of available replicas.

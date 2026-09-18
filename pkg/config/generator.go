@@ -19,17 +19,27 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 
 	ogxiov1beta1 "github.com/ogx-ai/ogx-k8s-operator/api/v1beta1"
 	"gopkg.in/yaml.v3"
 )
 
+// praxisServedAPIs lists the APIs served by Praxis rather than OGX. In Praxis-fronted mode the
+// operator disables these in OGX's generated config (Praxis serves them), without mutating the
+// user's CR.
+var praxisServedAPIs = []string{"responses", "conversations"}
+
 // GenerateConfig orchestrates the config generation pipeline.
-// It takes the OGXServer spec and resolved base config, producing a
-// complete config.yaml with all provider/resource/storage expansions applied.
-func GenerateConfig(spec *ogxiov1beta1.OGXServerSpec, baseConfigData []byte) (*GeneratedConfig, error) {
+// It takes the OGXServer spec, the resolved base config, and whether the instance runs in
+// Praxis-fronted mode, producing a complete config.yaml with all provider/resource/storage
+// expansions applied. When praxisMode is true the Praxis-served APIs (Responses, Conversations)
+// are disabled in the generated config (Praxis serves them) without mutating the user's CR.
+func GenerateConfig(spec *ogxiov1beta1.OGXServerSpec, baseConfigData []byte, praxisMode bool) (*GeneratedConfig, error) {
 	// Parse base config
 	baseConfig, err := ParseBaseConfig(baseConfigData)
 	if err != nil {
@@ -55,11 +65,14 @@ func GenerateConfig(spec *ogxiov1beta1.OGXServerSpec, baseConfigData []byte) (*G
 	userStorage := ApplyStorage(spec.Storage)
 	mergedStorage := MergeStorage(baseConfig.Storage, userStorage)
 
-	// Determine APIs (filter disabled)
-	mergedAPIs := MergeAPIs(baseConfig.APIs, spec.DisabledAPIs)
+	// Determine APIs (filter disabled). In Praxis-fronted mode the Responses and Conversations
+	// APIs are served by Praxis, so they are disabled here internally — this augments
+	// spec.DisabledAPIs rather than mutating the user's CR.
+	disabledAPIs := effectiveDisabledAPIs(spec.DisabledAPIs, praxisMode)
+	mergedAPIs := MergeAPIs(baseConfig.APIs, disabledAPIs)
 
 	// Build the final config.yaml structure
-	finalConfig := buildFinalConfig(baseConfig, mergedProviders, userModels, mergedStorage, mergedAPIs, spec)
+	finalConfig := buildFinalConfig(baseConfig, mergedProviders, userModels, mergedStorage, mergedAPIs, spec, praxisMode)
 
 	// Serialize to YAML
 	configYAML, err := yaml.Marshal(finalConfig)
@@ -89,7 +102,130 @@ func GenerateConfig(spec *ogxiov1beta1.OGXServerSpec, baseConfigData []byte) (*G
 		ResourceCount:          resourceCount,
 		ConfigVersion:          configVersion,
 		ConfigVersionDefaulted: !configVersionParsed,
+		PraxisAPIsFiltered:     praxisMode && len(baseConfig.APIs) > 0,
 	}, nil
+}
+
+// GeneratePraxisDefaultConfig derives a runtime config from the distribution default, replacing
+// only server.auth and the Praxis-served entries of apis: for a Praxis-fronted instance. Unlike
+// GenerateConfig, it preserves all unrecognized sections from the default config.
+//
+// This path is only reachable in Praxis-fronted mode: shouldGenerateConfig requires
+// !HasOverrideConfig() && (HasDeclarativeConfig() || praxisMode), and the caller selects this
+// function precisely when HasDeclarativeConfig() is false — so praxisMode must be true.
+func GeneratePraxisDefaultConfig(spec *ogxiov1beta1.OGXServerSpec, baseConfigData []byte) (*GeneratedConfig, error) {
+	baseConfig, err := ParseBaseConfig(baseConfigData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse base config: %w", err)
+	}
+
+	var cfg map[string]interface{}
+	if unmarshalErr := yaml.Unmarshal(baseConfigData, &cfg); unmarshalErr != nil {
+		return nil, fmt.Errorf("failed to parse default config: %w", unmarshalErr)
+	}
+	if cfg == nil {
+		cfg = make(map[string]interface{})
+	}
+	server, err := serverSection(cfg)
+	if err != nil {
+		return nil, err
+	}
+	applyPraxisAuth(server)
+	if spec.Network != nil && spec.Network.Port != 0 {
+		server["port"] = spec.Network.Port
+	}
+	cfg["server"] = server
+	applyPraxisVectorStoreMetadata(storageSection(cfg), hasVectorIOProvider(cfg))
+
+	// Disable the Praxis-served APIs. Without this, a greenfield CR carrying only
+	// spec.distribution would keep serving /v1/responses behind the NetworkPolicy.
+	apisFiltered := filterAPIList(cfg, effectiveDisabledAPIs(spec.DisabledAPIs, true))
+
+	configYAML, err := yaml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize config: %w", err)
+	}
+	hash := sha256.Sum256(configYAML)
+	configVersion, configVersionParsed := parseConfigVersion(baseConfig.Version)
+	resourceCount := 0
+	if baseConfig.RegisteredResources != nil {
+		resourceCount = len(baseConfig.RegisteredResources.Models)
+	}
+
+	return &GeneratedConfig{
+		ConfigYAML:             string(configYAML),
+		ContentHash:            hex.EncodeToString(hash[:8]),
+		EnvVars:                CollectSecretRefs(spec),
+		ProviderCount:          countProviders(baseConfig.Providers),
+		ResourceCount:          resourceCount,
+		ConfigVersion:          configVersion,
+		ConfigVersionDefaulted: !configVersionParsed,
+		PraxisAPIsFiltered:     apisFiltered,
+	}, nil
+}
+
+// effectiveDisabledAPIs returns the APIs to omit from the generated config. In Praxis-fronted
+// mode the Praxis-served APIs are added to whatever the user disabled explicitly. The caller's
+// slice is never mutated.
+func effectiveDisabledAPIs(specDisabled []string, praxisMode bool) []string {
+	if !praxisMode {
+		return specDisabled
+	}
+	disabled := specDisabled
+	for _, api := range praxisServedAPIs {
+		disabled = appendIfMissing(disabled, api)
+	}
+	return disabled
+}
+
+// filterAPIList removes the disabled APIs from cfg["apis"] in place, reporting whether the list
+// was present and could be filtered.
+//
+// OGX gates its served API surface on `if run_config.apis:` (ogx-ai/ogx server.py), which is a
+// Python truthiness test. Both an absent key and an empty list take the else branch and serve
+// every API the configured providers support. So neither deleting the key nor writing an empty
+// list disables anything — both do the opposite. If every entry would be filtered out we
+// therefore leave the list untouched and report false, which surfaces through
+// GeneratedConfig.PraxisAPIsFiltered as "the operator could not disable these through config".
+// Emitting the maximally-permissive config in response to the maximally-restrictive request is
+// the one outcome worth ruling out. See ogx-ai/ogx#6558.
+func filterAPIList(cfg map[string]interface{}, disabled []string) bool {
+	raw, ok := cfg["apis"].([]interface{})
+	if !ok {
+		return false
+	}
+
+	omit := make(map[string]bool, len(disabled))
+	for _, api := range disabled {
+		omit[api] = true
+	}
+
+	kept := make([]interface{}, 0, len(raw))
+	for _, item := range raw {
+		if name, isString := item.(string); isString && omit[name] {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == 0 {
+		return false
+	}
+	cfg["apis"] = kept
+
+	return true
+}
+
+// appendIfMissing returns items with value appended, unless it is already present. The input slice
+// is not mutated (a fresh slice is returned when appending) so the caller's spec is left untouched.
+func appendIfMissing(items []string, value string) []string {
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	out := make([]string, len(items), len(items)+1)
+	copy(out, items)
+	return append(out, value)
 }
 
 func buildFinalConfig(
@@ -99,6 +235,7 @@ func buildFinalConfig(
 	storage map[string]interface{},
 	apis []string,
 	spec *ogxiov1beta1.OGXServerSpec,
+	praxisMode bool,
 ) map[string]interface{} {
 	cfg := make(map[string]interface{})
 
@@ -119,8 +256,11 @@ func buildFinalConfig(
 	if base.VectorStores != nil {
 		cfg["vector_stores"] = base.VectorStores
 	}
-	cfg["server"] = buildServerSection(base, spec)
+	cfg["server"] = buildServerSection(base, spec, praxisMode)
 	buildStorageSection(cfg, storage, base)
+	if praxisMode {
+		applyPraxisVectorStoreMetadata(storageSection(cfg), len(providers["vector_io"]) > 0)
+	}
 
 	return cfg
 }
@@ -179,10 +319,13 @@ func buildRegisteredResources(base *BaseConfig, userModels []ConfigModel) *Regis
 	return rr
 }
 
-func buildServerSection(base *BaseConfig, spec *ogxiov1beta1.OGXServerSpec) map[string]interface{} {
+func buildServerSection(base *BaseConfig, spec *ogxiov1beta1.OGXServerSpec, praxisMode bool) map[string]interface{} {
 	server := make(map[string]interface{})
 	for k, v := range base.Server {
 		server[k] = v
+	}
+	if praxisMode {
+		applyPraxisAuth(server)
 	}
 	if spec.Network != nil && spec.Network.Port != 0 {
 		server["port"] = spec.Network.Port
@@ -192,12 +335,154 @@ func buildServerSection(base *BaseConfig, spec *ogxiov1beta1.OGXServerSpec) map[
 	return server
 }
 
+func serverSection(cfg map[string]interface{}) (map[string]interface{}, error) {
+	server, ok := cfg["server"]
+	if !ok || server == nil {
+		return make(map[string]interface{}), nil
+	}
+	section, ok := server.(map[string]interface{})
+	if !ok {
+		return nil, errors.New("failed to parse default config: server must be an object")
+	}
+	return section, nil
+}
+
+func applyPraxisAuth(server map[string]interface{}) {
+	server["auth"] = map[string]interface{}{
+		"provider_config": map[string]interface{}{
+			"type":             "upstream_header",
+			"principal_header": "x-user-id",
+			"tenant_header":    "x-tenant-id",
+		},
+		"access_policy": []interface{}{
+			map[string]interface{}{
+				"permit":      map[string]interface{}{"actions": []string{"read"}},
+				"when":        "resource is unowned",
+				"description": "All users can read system resources",
+			},
+			map[string]interface{}{
+				"permit":      map[string]interface{}{"actions": []string{"create"}},
+				"description": "Authenticated users can create resources",
+			},
+			map[string]interface{}{
+				"permit":      map[string]interface{}{"actions": []string{"read", "update", "delete"}},
+				"when":        "user is owner",
+				"description": "Owners can manage their own resources",
+			},
+		},
+	}
+	server["tenancy"] = map[string]interface{}{"mode": "multi"}
+}
+
 func buildStorageSection(cfg map[string]interface{}, storage map[string]interface{}, base *BaseConfig) {
 	if storage != nil {
 		cfg["storage"] = storage
 	} else if base.Storage != nil {
 		cfg["storage"] = base.Storage
 	}
+}
+
+// praxisVectorStoreTable names the SQL table holding per-tenant vector-store metadata when the
+// operator has to declare the store itself. See applyPraxisVectorStoreMetadata.
+const praxisVectorStoreTable = "openai_vector_stores"
+
+// applyPraxisVectorStoreMetadata makes the storage section satisfy what Praxis mode's own auth
+// settings demand of OGX.
+//
+// applyPraxisAuth turns on multi-tenancy and an access policy. OGX then refuses to start any
+// vector_io provider unless storage.stores.vector_stores names a SQL store to hold per-tenant
+// vector-store metadata — it is injected as the provider's metadata_store, and its absence is a
+// hard startup error ("metadata_store is required when tenancy mode is 'multi'"). No shipped
+// distribution config declares that store, so without this the greenfield path emits a config
+// whose pod CrashLoopBackOffs before serving anything.
+//
+// It is deliberately conservative and leaves the config alone when there is nothing to fix or no
+// grounded way to fix it: no vector_io provider is configured, the config already declares the
+// store, or the distribution offers no SQL backend to point at (the operator cannot invent a
+// database). In that last case OGX still fails to start, but it fails on the distribution's own
+// incomplete storage config rather than on a backend reference the operator made up.
+func applyPraxisVectorStoreMetadata(storage map[string]interface{}, hasVectorIOProvider bool) {
+	if !hasVectorIOProvider || storage == nil {
+		return
+	}
+
+	backend := sqlBackendName(storage)
+	if backend == "" {
+		return
+	}
+
+	stores, ok := storage["stores"].(map[string]interface{})
+	if !ok {
+		if _, present := storage["stores"]; present {
+			// Present but not an object — malformed; refuse to guess.
+			return
+		}
+		stores = make(map[string]interface{})
+		storage["stores"] = stores
+	}
+	if existing, declared := stores["vector_stores"]; declared && existing != nil {
+		return
+	}
+
+	stores["vector_stores"] = map[string]interface{}{
+		"table_name": praxisVectorStoreTable,
+		"backend":    backend,
+	}
+}
+
+// sqlBackendName picks a SQL backend from storage.backends to attach a new store to, preferring
+// the conventional sql_default. Selection is deterministic — the generated config's hash names its
+// ConfigMap, so map iteration order must not change the result.
+func sqlBackendName(storage map[string]interface{}) string {
+	backends, ok := storage["backends"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+
+	const preferred = "sql_default"
+	if isSQLBackend(backends[preferred]) {
+		return preferred
+	}
+
+	candidates := make([]string, 0, len(backends))
+	for name, backend := range backends {
+		if isSQLBackend(backend) {
+			candidates = append(candidates, name)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.Strings(candidates)
+	return candidates[0]
+}
+
+func isSQLBackend(backend interface{}) bool {
+	cfg, ok := backend.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	backendType, ok := cfg["type"].(string)
+	return ok && strings.HasPrefix(backendType, "sql_")
+}
+
+// storageSection returns the storage map already installed in cfg, or nil when there is none.
+func storageSection(cfg map[string]interface{}) map[string]interface{} {
+	storage, ok := cfg["storage"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return storage
+}
+
+// hasVectorIOProvider reports whether a raw (unparsed) config declares any vector_io provider.
+func hasVectorIOProvider(cfg map[string]interface{}) bool {
+	providers, ok := cfg["providers"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	vectorIO, ok := providers["vector_io"].([]interface{})
+	return ok && len(vectorIO) > 0
 }
 
 func countProviders(providers map[string][]ConfigProvider) int {
