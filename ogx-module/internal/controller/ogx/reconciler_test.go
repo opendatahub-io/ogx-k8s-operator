@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -833,6 +835,50 @@ func newOGXServerUnstructuredNoConditions(name, namespace string) *unstructured.
 	}
 	obj.SetGroupVersionKind(ogxServerGVK)
 	return obj
+}
+
+func TestPlatformOperatorVersionMatchesManager(t *testing.T) {
+	configRoot := filepath.Join("..", "..", "..", "..", "config")
+	managerData, err := os.ReadFile(filepath.Join(configRoot, "manager", "manager.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(string(managerData)), 4096)
+	var deployment appsv1.Deployment
+	for deployment.Kind != "Deployment" {
+		if err := decoder.Decode(&deployment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var expectedVersion string
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		for _, env := range container.Env {
+			if env.Name == "OPERATOR_VERSION" {
+				expectedVersion = env.Value
+			}
+		}
+	}
+	if expectedVersion == "" {
+		t.Fatal("manager deployment has no OPERATOR_VERSION")
+	}
+
+	for _, platform := range []string{"odh", "rhoai"} {
+		t.Run(platform, func(t *testing.T) {
+			params, err := os.ReadFile(filepath.Join(configRoot, "overlays", platform, "params.env"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(string(params), "\n") {
+				if value, found := strings.CutPrefix(line, "OPERATOR_VERSION="); found {
+					if got := strings.Trim(value, "\""); got != expectedVersion {
+						t.Fatalf("OPERATOR_VERSION = %q, manager version = %q", got, expectedVersion)
+					}
+					return
+				}
+			}
+			t.Fatal("platform params have no OPERATOR_VERSION")
+		})
+	}
 }
 
 func TestResolveImageParamOverride(t *testing.T) {
