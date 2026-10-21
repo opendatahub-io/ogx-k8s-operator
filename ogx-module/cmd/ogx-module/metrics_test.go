@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	pkgtls "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/tls"
 	configv1 "github.com/openshift/api/config/v1"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -56,7 +58,7 @@ func TestMetricsTLSHandshakes(t *testing.T) {
 	for _, profileType := range []configv1.TLSProfileType{configv1.TLSProfileIntermediateType, configv1.TLSProfileModernType} {
 		t.Run(string(profileType), func(t *testing.T) {
 			dir, roots := metricsTestCertificate(t)
-			tlsOpts, err := tlsOptionsFromProfile(*configv1.TLSProfiles[profileType], configv1.TLSAdherencePolicyStrictAllComponents)
+			tlsOpts, err := pkgtls.OptionsFromProfile(*configv1.TLSProfiles[profileType], configv1.TLSAdherencePolicyStrictAllComponents, logr.Discard())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -111,10 +113,10 @@ func TestMetricsTLSHandshakes(t *testing.T) {
 
 func TestMetricsCipherRestriction(t *testing.T) {
 	dir, roots := metricsTestCertificate(t)
-	tlsOpts, err := tlsOptionsFromProfile(configv1.TLSProfileSpec{
+	tlsOpts, err := pkgtls.OptionsFromProfile(configv1.TLSProfileSpec{
 		MinTLSVersion: configv1.VersionTLS12,
 		Ciphers:       []string{"TLS_AES_128_GCM_SHA256", "ECDHE-ECDSA-AES128-GCM-SHA256", "not-a-cipher"},
-	}, configv1.TLSAdherencePolicyStrictAllComponents)
+	}, configv1.TLSAdherencePolicyStrictAllComponents, logr.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +143,7 @@ func TestMetricsCipherRestriction(t *testing.T) {
 }
 
 func TestSelfSignedMetrics(t *testing.T) {
-	tlsOpts, err := tlsOptionsFromProfile(*configv1.TLSProfiles[configv1.TLSProfileIntermediateType], "")
+	tlsOpts, err := pkgtls.OptionsFromProfile(*configv1.TLSProfiles[configv1.TLSProfileIntermediateType], "", logr.Discard())
 	if err != nil {
 		t.Fatal(err)
 	}

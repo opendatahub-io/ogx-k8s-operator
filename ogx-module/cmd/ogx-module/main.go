@@ -9,6 +9,7 @@ import (
 	controllerogx "github.com/ogx-ai/ogx-k8s-operator/ogx-module/internal/controller/ogx"
 	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
 	moduleconfig "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/config"
+	pkgtls "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/tls"
 	configv1 "github.com/openshift/api/config/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
@@ -73,11 +74,11 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 	if err != nil {
 		return fmt.Errorf("failed to get Kubernetes configuration: %w", err)
 	}
-	tlsResult, err := setupTLS(ctx, restCfg)
+	tlsResult, err := pkgtls.Resolve(ctx, restCfg, setupLog)
 	if err != nil {
 		return fmt.Errorf("failed to set up TLS: %w", err)
 	}
-	metricsOptions, err := buildMetricsOptions(metricsAddr, metricsCertPath, tlsResult.tlsOpts)
+	metricsOptions, err := buildMetricsOptions(metricsAddr, metricsCertPath, tlsResult.TLSOpts)
 	if err != nil {
 		return err
 	}
@@ -130,14 +131,8 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("failed to set up ready check: %w", err)
 	}
-	if tlsResult.hasOpenShiftConfigAPI {
-		if err := tlsResult.securityProfileWatcher(mgr.GetClient(), cancel).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("failed to register TLS security profile watcher: %w", err)
-		}
-	} else if tlsResult.retryTLSConfig {
-		if err := mgr.Add(&tlsFallbackWatcher{watcher: tlsResult.securityProfileWatcher(tlsResult.bootstrapClient, cancel)}); err != nil {
-			return fmt.Errorf("failed to register TLS fallback watcher: %w", err)
-		}
+	if err := pkgtls.SetupWatcher(mgr, tlsResult, cancel, setupLog); err != nil {
+		return err
 	}
 
 	setupLog.Info("starting manager")
