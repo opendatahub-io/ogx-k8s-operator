@@ -33,6 +33,10 @@ jobs:
         with:
           go-version-file: ogx-module/go.mod
 
+      - name: Run module unit tests
+        working-directory: ogx-module
+        run: go test -mod=readonly ./cmd/... ./pkg/... ./internal/...
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -83,6 +87,20 @@ jobs:
           until docker exec kind-registry true 2>/dev/null; do sleep 1; done
           docker push kind-registry:5000/odh-ogx-module-operator:latest
           docker push kind-registry:5000/ogx-k8s-operator:latest
+
+      - name: Create metrics serving certificate for Kind
+        run: |
+          # Kind has no OpenShift service CA to fulfill the ODH overlay's request.
+          kubectl create namespace opendatahub-ogx-system --dry-run=client -o yaml | kubectl apply -f -
+          cert_dir=$(mktemp -d)
+          trap 'rm -rf "$cert_dir"' EXIT
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$cert_dir/tls.key" -out "$cert_dir/tls.crt" \
+            -subj '/CN=opendatahub-ogx-metrics-service.opendatahub-ogx-system.svc' \
+            -addext 'subjectAltName=DNS:opendatahub-ogx-metrics-service.opendatahub-ogx-system.svc'
+          kubectl -n opendatahub-ogx-system create secret tls opendatahub-ogx-metrics-server-cert \
+            --cert="$cert_dir/tls.crt" --key="$cert_dir/tls.key" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy ogx-module operator
         run: |

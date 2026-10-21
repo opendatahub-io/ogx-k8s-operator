@@ -93,7 +93,7 @@ func TestTLSReadFailures(t *testing.T) {
 				if key.Name != "cluster" || key.Namespace != "" {
 					t.Fatalf("unexpected object key: %v", key)
 				}
-				return fmt.Errorf("wrapped: %w", tc.err)
+				return fmt.Errorf("failed to read test configuration: %w", tc.err)
 			}}
 			result, err := readTLSConfig(context.Background(), reader)
 			if !tc.fallback {

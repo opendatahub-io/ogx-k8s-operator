@@ -19,7 +19,7 @@ func buildMetricsOptions(addr, certPath string, tlsOpts []func(*tls.Config)) (me
 		// controller-runtime otherwise silently substitutes a self-signed
 		// certificate when explicitly configured certificate files are absent.
 		if _, err := tls.LoadX509KeyPair(filepath.Join(certPath, "tls.crt"), filepath.Join(certPath, "tls.key")); err != nil {
-			return opts, fmt.Errorf("load metrics serving certificate: %w", err)
+			return opts, fmt.Errorf("failed to load metrics serving certificate: %w", err)
 		}
 	}
 	return opts, nil

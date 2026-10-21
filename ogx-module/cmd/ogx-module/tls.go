@@ -39,7 +39,7 @@ func setupTLS(ctx context.Context, cfg *rest.Config) (tlsSetupResult, error) {
 	bootstrapConfig.Timeout = tlsBootstrapTimeout
 	bootstrapClient, err := client.New(bootstrapConfig, client.Options{Scheme: scheme})
 	if err != nil {
-		return tlsSetupResult{}, fmt.Errorf("create TLS bootstrap client: %w", err)
+		return tlsSetupResult{}, fmt.Errorf("failed to create TLS bootstrap client: %w", err)
 	}
 	result, err := readTLSConfig(ctx, bootstrapClient)
 	result.bootstrapClient = bootstrapClient
@@ -54,7 +54,7 @@ func readTLSConfig(ctx context.Context, reader client.Reader) (tlsSetupResult, e
 	err := reader.Get(ctx, client.ObjectKey{Name: tlspkg.APIServerName}, apiServer)
 	if err != nil {
 		if !canFallbackTLS(err) {
-			return result, fmt.Errorf("read APIServer TLS configuration: %w", err)
+			return result, fmt.Errorf("failed to read APIServer TLS configuration: %w", err)
 		}
 		setupLog.Info("Unable to read cluster TLS configuration, using Intermediate TLS profile", "error", err)
 		result.profile = *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
@@ -67,7 +67,7 @@ func readTLSConfig(ctx context.Context, reader client.Reader) (tlsSetupResult, e
 		result.adherencePolicy = apiServer.Spec.TLSAdherence
 		result.profile, err = tlspkg.GetTLSProfileSpec(apiServer.Spec.TLSSecurityProfile)
 		if err != nil {
-			return result, fmt.Errorf("resolve APIServer TLS profile: %w", err)
+			return result, fmt.Errorf("failed to resolve APIServer TLS profile: %w", err)
 		}
 	}
 
@@ -105,7 +105,7 @@ func tlsOptionsFromProfile(profile configv1.TLSProfileSpec, adherence configv1.T
 	switch profile.MinTLSVersion {
 	case configv1.VersionTLS10, configv1.VersionTLS11, configv1.VersionTLS12, configv1.VersionTLS13:
 	default:
-		return nil, fmt.Errorf("invalid minimum TLS version %q", profile.MinTLSVersion)
+		return nil, fmt.Errorf("failed to configure TLS: invalid minimum TLS version %q", profile.MinTLSVersion)
 	}
 
 	configure, unsupported := tlspkg.NewTLSConfigFromProfile(profile)
@@ -135,7 +135,7 @@ func tlsOptionsFromProfile(profile configv1.TLSProfileSpec, adherence configv1.T
 			}
 		}
 		if len(usable) == 0 && (len(profile.Ciphers) > 0 || strict) {
-			return nil, fmt.Errorf("TLS profile has no usable TLS <= 1.2 cipher suites")
+			return nil, fmt.Errorf("failed to configure TLS: profile has no usable TLS <= 1.2 cipher suites")
 		}
 		resolved.CipherSuites = usable
 	}
@@ -185,7 +185,7 @@ func (w *tlsFallbackWatcher) Start(ctx context.Context) error {
 			return nil
 		}
 		if err != nil && !canFallbackTLS(err) {
-			return fmt.Errorf("watch TLS configuration after startup fallback: %w", err)
+			return fmt.Errorf("failed to watch TLS configuration after startup fallback: %w", err)
 		}
 		select {
 		case <-ctx.Done():

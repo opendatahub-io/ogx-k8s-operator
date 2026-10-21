@@ -71,11 +71,11 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 	leaderNS := operatorNS
 	restCfg, err := ctrl.GetConfig()
 	if err != nil {
-		return fmt.Errorf("get Kubernetes configuration: %w", err)
+		return fmt.Errorf("failed to get Kubernetes configuration: %w", err)
 	}
 	tlsResult, err := setupTLS(ctx, restCfg)
 	if err != nil {
-		return fmt.Errorf("set up TLS: %w", err)
+		return fmt.Errorf("failed to set up TLS: %w", err)
 	}
 	metricsOptions, err := buildMetricsOptions(metricsAddr, metricsCertPath, tlsResult.tlsOpts)
 	if err != nil {
@@ -84,12 +84,12 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 
 	dynamicClient, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		return fmt.Errorf("create dynamic client: %w", err)
+		return fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restCfg)
 	if err != nil {
-		return fmt.Errorf("create discovery client: %w", err)
+		return fmt.Errorf("failed to create discovery client: %w", err)
 	}
 
 	watchNamespaces := map[string]cache.Config{}
@@ -110,7 +110,7 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 		Cache:                   cache.Options{DefaultNamespaces: watchNamespaces},
 	})
 	if err != nil {
-		return fmt.Errorf("create manager: %w", err)
+		return fmt.Errorf("failed to create manager: %w", err)
 	}
 
 	if err := controllerogx.NewReconciler(
@@ -121,22 +121,22 @@ func run(ctx context.Context, cfg *moduleconfig.Config, metricsAddr, probeAddr, 
 		dynamicClient,
 		discoveryClient,
 	).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("create OGX controller: %w", err)
+		return fmt.Errorf("failed to create OGX controller: %w", err)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		return fmt.Errorf("set up health check: %w", err)
+		return fmt.Errorf("failed to set up health check: %w", err)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		return fmt.Errorf("set up ready check: %w", err)
+		return fmt.Errorf("failed to set up ready check: %w", err)
 	}
 	if tlsResult.hasOpenShiftConfigAPI {
 		if err := tlsResult.securityProfileWatcher(mgr.GetClient(), cancel).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("register TLS security profile watcher: %w", err)
+			return fmt.Errorf("failed to register TLS security profile watcher: %w", err)
 		}
 	} else if tlsResult.retryTLSConfig {
 		if err := mgr.Add(&tlsFallbackWatcher{watcher: tlsResult.securityProfileWatcher(tlsResult.bootstrapClient, cancel)}); err != nil {
-			return fmt.Errorf("register TLS fallback watcher: %w", err)
+			return fmt.Errorf("failed to register TLS fallback watcher: %w", err)
 		}
 	}
 
