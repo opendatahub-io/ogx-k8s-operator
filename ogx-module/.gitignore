@@ -2,4 +2,4 @@
 config/manifests/ogx/
 
 # Built binary
-ogx-module
+/ogx-module

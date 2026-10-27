@@ -2,6 +2,7 @@
 package e2e
 
 import (
+	"context"
 	"testing"
 
 	platformv1alpha1 "github.com/ogx-ai/ogx-k8s-operator/ogx-module/pkg/apis/v1alpha1"
@@ -11,6 +12,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -35,8 +37,16 @@ func runCreationTests(t *testing.T) *platformv1alpha1.OGX {
 
 	t.Run("should add the OGX finalizer", func(t *testing.T) {
 		requireOGX(t)
-		updated := getOGX(t)
-		require.True(t, containsFinalizer(updated, ogxFinalizer), "OGX should have finalizer %s", ogxFinalizer)
+		// Reconciliation is asynchronous; creation does not guarantee that
+		// the controller has persisted the finalizer yet.
+		err := wait.PollUntilContextTimeout(TestEnv.Ctx, generalRetryInterval, ResourceReadyTimeout, true, func(ctx context.Context) (bool, error) {
+			updated := &platformv1alpha1.OGX{}
+			if err := TestEnv.Client.Get(ctx, client.ObjectKeyFromObject(instance), updated); err != nil {
+				return false, err
+			}
+			return containsFinalizer(updated, ogxFinalizer), nil
+		})
+		requireNoErrorWithDebugging(t, err, "OGX should have finalizer "+ogxFinalizer)
 	})
 
 	t.Run("should deploy the root OGX operator with a ready status", func(t *testing.T) {

@@ -24,7 +24,7 @@ const (
 	DefaultApplicationsNS     = "opendatahub"
 	DefaultPlatformName       = "OpenDataHub"
 	DefaultPlatformVersion    = "unknown"
-	DefaultMetricsBindAddr    = ":8080"
+	DefaultMetricsBindAddr    = ":8443"
 	DefaultHealthBindAddr     = ":8081"
 	DefaultLeaderElectEnabled = true
 	DefaultLeaderElectID      = "opendatahub-ogx-operator-lock"

@@ -224,13 +224,25 @@ func requireDeploymentPodsReady(t *testing.T, deployment *appsv1.Deployment) {
 	require.NoError(t, err, "Failed to list pods for deployment %s/%s", deployment.Namespace, deployment.Name)
 	require.NotEmpty(t, podList.Items, "No pods found for deployment %s/%s", deployment.Namespace, deployment.Name)
 
+	activePods := 0
 	for _, pod := range podList.Items {
+		// A completed rollout can still list old pods awaiting deletion.
+		// Their shutdown state does not describe the serving replicas.
+		if !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+		activePods++
 		require.Equal(t, corev1.PodRunning, pod.Status.Phase, "Pod %s is not running", pod.Name)
 		require.True(t, isPodReady(&pod), "Pod %s is not ready", pod.Name)
 		for _, cs := range pod.Status.ContainerStatuses {
 			require.True(t, cs.Ready, "Container %s in pod %s is not ready", cs.Name, pod.Name)
 		}
 	}
+	expected := int32(1)
+	if deployment.Spec.Replicas != nil {
+		expected = *deployment.Spec.Replicas
+	}
+	require.GreaterOrEqual(t, activePods, int(expected), "Deployment %s/%s has too few non-terminating pods", deployment.Namespace, deployment.Name)
 }
 
 func isPodReady(pod *corev1.Pod) bool {
@@ -376,7 +388,7 @@ func generateSelfSignedCert(dnsNames []string) ([]byte, []byte, error) {
 		Subject: pkix.Name{
 			CommonName: commonName,
 		},
-		DNSNames: dnsNames,
+		DNSNames:              dnsNames,
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
