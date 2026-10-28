@@ -5,6 +5,29 @@ import (
 	"testing/fstest"
 )
 
+func TestLoadFromFSMetricsAddress(t *testing.T) {
+	t.Setenv("ODH_MODULE_OPERATOR_CONTROLLER_METRICS_BIND_ADDRESS", "")
+	for _, tt := range []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "default", data: "{}", want: ":8443"},
+		{name: "disabled", data: "controller:\n  metrics:\n    bind-address: \"0\"\n", want: "0"},
+		{name: "custom", data: "controller:\n  metrics:\n    bind-address: \":9443\"\n", want: ":9443"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromFS(fstest.MapFS{"config.yaml": {Data: []byte(tt.data)}})
+			if err != nil {
+				t.Fatalf("LoadFromFS() error = %v", err)
+			}
+			if got := cfg.Controller.Metrics.BindAddress; got != tt.want {
+				t.Fatalf("metrics bind address = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadFromFSReadsCamelCasePlatformVersion(t *testing.T) {
 	t.Parallel()
 

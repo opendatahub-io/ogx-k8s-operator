@@ -20,6 +20,8 @@ jobs:
   ogx-module-e2e-tests:
     name: ogx-module-e2e-tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       success: ${{ steps.test-results.outputs.success }}
       summary: ${{ steps.test-results.outputs.summary }}
@@ -33,8 +35,19 @@ jobs:
         with:
           go-version-file: ogx-module/go.mod
 
+      - name: Run module unit tests
+        working-directory: ogx-module
+        run: go test -mod=readonly ./cmd/... ./pkg/... ./internal/...
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Configure Docker for local registry
+        run: |
+          # Configure the daemon before Kind starts; restarting it afterwards
+          # also interrupts the cluster's control-plane container.
+          echo '{"insecure-registries": ["kind-registry:5000"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
 
       - name: Create kind config
         run: |
@@ -66,6 +79,18 @@ jobs:
           registry_enable_delete: true
           config: kind-config.yaml
 
+      - name: Wait for local registry
+        run: |
+          for attempt in {1..12}; do
+            if curl --noproxy '*' --fail --silent --show-error --max-time 5 http://kind-registry:5000/v2/; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Local registry did not become ready"
+          docker logs --tail=100 kind-registry || true
+          exit 1
+
       - name: Build module operator image
         run: |
           docker build -t kind-registry:5000/odh-ogx-module-operator:run-${{ github.run_id }} -f ogx-module/Dockerfile .
@@ -78,11 +103,36 @@ jobs:
 
       - name: Push images to local registry
         run: |
-          echo '{"insecure-registries": ["kind-registry:5000"]}' | sudo tee /etc/docker/daemon.json
-          sudo systemctl restart docker
-          until docker exec kind-registry true 2>/dev/null; do sleep 1; done
           docker push kind-registry:5000/odh-ogx-module-operator:latest
           docker push kind-registry:5000/ogx-k8s-operator:latest
+
+      - name: Wait for Kind API and schema validation
+        run: |
+          for attempt in {1..12}; do
+            if kubectl --request-timeout=5s get --raw='/readyz' > /dev/null && \
+              kubectl create namespace opendatahub-ogx-system --dry-run=client -o yaml | \
+                kubectl --request-timeout=5s apply --dry-run=server -f -; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Kind API or OpenAPI validation did not become ready"
+          kubectl -n kube-system get pods -o wide || true
+          exit 1
+
+      - name: Create metrics serving certificate for Kind
+        run: |
+          # Kind has no OpenShift service CA to fulfill the ODH overlay's request.
+          kubectl create namespace opendatahub-ogx-system --dry-run=client -o yaml | kubectl apply -f -
+          cert_dir=$(mktemp -d)
+          trap 'rm -rf "$cert_dir"' EXIT
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$cert_dir/tls.key" -out "$cert_dir/tls.crt" \
+            -subj '/CN=opendatahub-ogx-metrics-service.opendatahub-ogx-system.svc' \
+            -addext 'subjectAltName=DNS:opendatahub-ogx-metrics-service.opendatahub-ogx-system.svc'
+          kubectl -n opendatahub-ogx-system create secret tls opendatahub-ogx-metrics-server-cert \
+            --cert="$cert_dir/tls.crt" --key="$cert_dir/tls.key" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy ogx-module operator
         run: |
@@ -90,7 +140,7 @@ jobs:
             OGX_MODULE_IMG=kind-registry:5000/odh-ogx-module-operator:latest \
             OGX_K8S_OPERATOR_IMG=kind-registry:5000/ogx-k8s-operator:latest
 
-          if ! kubectl wait --for=condition=available --timeout=300s deployment/opendatahub-ogx-operator -n opendatahub-ogx-system; then
+          if ! kubectl rollout status --timeout=300s deployment/opendatahub-ogx-operator -n opendatahub-ogx-system; then
             echo "Module operator deployment failed to become ready. Debugging information:"
             kubectl describe deployment opendatahub-ogx-operator -n opendatahub-ogx-system
             kubectl logs -l app.kubernetes.io/name=opendatahub-ogx-operator -n opendatahub-ogx-system --tail=100

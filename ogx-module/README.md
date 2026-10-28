@@ -159,6 +159,31 @@ kustomize build ogx-module/config/default | kubectl apply -f -
 The default bundle deploys the module operator into the
 `opendatahub-ogx-system` namespace.
 
+### Metrics TLS
+
+The module serves HTTPS metrics on port 8443 by default. The health endpoint
+remains on HTTP port 8081. Set `--metrics-bind-addr=0` to disable metrics.
+
+At startup the module reads the cluster `APIServer/cluster` TLS profile and
+adherence policy. Denied reads prevent startup. Missing OpenShift configuration
+APIs, a missing APIServer object, or transient read failures use the Intermediate
+profile. Changes to the profile or adherence policy trigger graceful shutdown;
+the Deployment restarts the container to load the new settings.
+
+On OpenShift, use `config/overlays/openshift`, `config/overlays/odh`, or
+`config/overlays/rhoai`. These request a serving certificate from the service CA
+and mount it into the manager. The binary accepts `--metrics-cert-path` pointing
+to a directory containing `tls.crt` and `tls.key`; an explicitly configured
+missing or invalid certificate prevents startup. Certificate rotation is handled
+by controller-runtime's certificate watcher.
+
+The default bundle also works on vanilla Kubernetes and uses controller-runtime's
+self-signed metrics certificate. A trusted certificate can be mounted and
+selected with `--metrics-cert-path`.
+
+Run module unit tests from this directory with `go test ./cmd/... ./pkg/... ./internal/...`.
+See [TLS verification](docs/tls-verification.md) for cluster checks.
+
 The module controller `Deployment` also carries the environment variables used
 by the module runtime:
 
