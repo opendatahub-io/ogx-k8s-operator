@@ -662,6 +662,12 @@ func (r *OGXServerReconciler) reconcileResources(ctx context.Context, instance *
 		return &requeueError{after: adoptResult.requeueAfter}
 	}
 
+	// Tear down insecure operator-owned Ingress before config/manifest steps
+	// that can fail and otherwise leave HTTP exposure in place.
+	if err = r.cleanupUnsafeOwnedIngress(ctx, instance); err != nil {
+		return fmt.Errorf("failed to clean up unsafe Ingress: %w", err)
+	}
+
 	// Reconcile ConfigMaps first
 	generated, err := r.reconcileConfigMaps(ctx, instance)
 	if err != nil {
@@ -1997,14 +2003,14 @@ func BuildPraxisPeer(instance *ogxiov1beta1.OGXServer) *networkingv1.NetworkPoli
 }
 
 // defaultPraxisPeer returns the fail-safe Praxis NetworkPolicy ingress peer: pods labeled
-// app: payload-processing in the openshift-ingress namespace. It is used when a CR does not set
-// spec.praxisMode.praxisSelector, and is never an allow-all peer. The namespace is provisional
-// (see ogxiov1beta1.DefaultPraxisNamespace) and can be overridden per-CR via praxisSelector.
+// app.kubernetes.io/name: praxis-gateway in the praxis-standalone namespace. It is used when a
+// CR does not set spec.praxisMode.praxisSelector, and is never an allow-all peer. Override
+// per-CR via praxisSelector (see ogxiov1beta1.DefaultPraxisNamespace).
 func defaultPraxisPeer() *networkingv1.NetworkPolicyPeer {
 	return &networkingv1.NetworkPolicyPeer{
 		PodSelector: &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				ogxiov1beta1.DefaultLabelKey: ogxiov1beta1.DefaultPraxisPodLabelValue,
+				ogxiov1beta1.DefaultPraxisPodLabelKey: ogxiov1beta1.DefaultPraxisPodLabelValue,
 			},
 		},
 		NamespaceSelector: &metav1.LabelSelector{

@@ -3,5 +3,5 @@ releases:
     version: v1.4.1
     repoUrl: https://github.com/opendatahub-io/ogx-distribution
   - name: OGX Operator
-    version: v0.17.0
+    version: v0.17.2
     repoUrl: https://github.com/opendatahub-io/ogx-k8s-operator
