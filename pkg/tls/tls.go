@@ -80,7 +80,9 @@ func Resolve(cfg *restclient.Config, logger logr.Logger) (*Result, error) {
 	if err != nil {
 		switch {
 		case apimeta.IsNoMatchError(err):
-			logger.Info("config.openshift.io API not available (non-OpenShift cluster), using Intermediate TLS profile as fallback")
+			logger.Info(
+				"config.openshift.io API not available (non-OpenShift cluster), using Intermediate TLS profile as fallback",
+			)
 		case apierrors.IsNotFound(err):
 			logger.Info("APIServer resource not found, using Intermediate TLS profile as fallback")
 		case isTransientReadError(err):
@@ -127,7 +129,9 @@ func buildProfileTLSOptsWithAdherence(
 	strict := adherence != configv1.TLSAdherencePolicyNoOpinion &&
 		adherence != configv1.TLSAdherencePolicyLegacyAdheringComponentsOnly
 	if strict && profile.MinTLSVersion != configv1.VersionTLS13 && len(profile.Ciphers) == 0 {
-		return nil, errors.New("failed to find usable cipher suites for TLS <= 1.2: strict adherence requires a non-empty cipher list")
+		return nil, errors.New(
+			"failed to find usable cipher suites for TLS <= 1.2: strict adherence requires a non-empty cipher list",
+		)
 	}
 	return opts, nil
 }
@@ -136,7 +140,11 @@ func buildProfileTLSOptsWithAdherence(
 // indicate a misconfigured or denied cluster (Forbidden, Unauthorized, other
 // non-transient errors) are returned so startup fails closed; a policy we
 // cannot read is indistinguishable from one we are silently not adhering to.
-func fetchAdherence(ctx context.Context, k8sClient client.Client, logger logr.Logger) (configv1.TLSAdherencePolicy, error) {
+func fetchAdherence(
+	ctx context.Context,
+	k8sClient client.Client,
+	logger logr.Logger,
+) (configv1.TLSAdherencePolicy, error) {
 	adherence, err := tlspkg.FetchAPIServerTLSAdherencePolicy(ctx, k8sClient)
 	if err != nil {
 		switch {
@@ -200,6 +208,26 @@ func usableCipherSuites(mapped []uint16) []uint16 {
 	return usable
 }
 
+var tlsGroupToCurveID = map[configv1.TLSGroup]tls.CurveID{
+	configv1.TLSGroupSecP256r1:          tls.CurveP256,
+	configv1.TLSGroupSecP384r1:          tls.CurveP384,
+	configv1.TLSGroupSecP521r1:          tls.CurveP521,
+	configv1.TLSGroupX25519:             tls.X25519,
+	configv1.TLSGroupX25519MLKEM768:     tls.X25519MLKEM768,
+	configv1.TLSGroupSecP256r1MLKEM768:  0x11EB,
+	configv1.TLSGroupSecP384r1MLKEM1024: 0x11ED,
+}
+
+func usableCurvePreferences(groups []configv1.TLSGroup) []tls.CurveID {
+	var usable []tls.CurveID
+	for _, group := range groups {
+		if curveID, ok := tlsGroupToCurveID[group]; ok {
+			usable = append(usable, curveID)
+		}
+	}
+	return usable
+}
+
 // buildProfileTLSOpts validates the profile and returns TLS opts applying it.
 func buildProfileTLSOpts(profile configv1.TLSProfileSpec, logger logr.Logger) ([]func(*tls.Config), error) {
 	minVersion, err := minTLSVersion(profile.MinTLSVersion)
@@ -216,6 +244,15 @@ func buildProfileTLSOpts(profile configv1.TLSProfileSpec, logger logr.Logger) ([
 		logger.Info("some ciphers from TLS profile are not supported by Go", "unsupported", unsupportedCiphers)
 	}
 	opts := []func(*tls.Config){tlsConfigFn}
+	curvePreferences := usableCurvePreferences(profile.Groups)
+	if len(profile.Groups) > 0 && len(curvePreferences) == 0 {
+		return nil, errors.New("TLS profile has no usable groups")
+	}
+	if len(curvePreferences) > 0 {
+		opts = append(opts, func(c *tls.Config) {
+			c.CurvePreferences = curvePreferences
+		})
+	}
 
 	if minVersion >= tls.VersionTLS13 {
 		// TLS 1.3 suites are managed by Go, never set CipherSuites.
@@ -228,7 +265,11 @@ func buildProfileTLSOpts(profile configv1.TLSProfileSpec, logger logr.Logger) ([
 	tlsConfigFn(probe)
 	usable := usableCipherSuites(probe.CipherSuites)
 	if len(profile.Ciphers) > 0 && len(usable) == 0 {
-		return nil, fmt.Errorf("failed to find usable cipher suites for TLS <= 1.2: all %d ciphers in TLS profile are TLS 1.3-only or unimplemented by Go", len(profile.Ciphers))
+		return nil, fmt.Errorf(
+			"failed to find usable cipher suites for TLS <= 1.2: all %d ciphers in TLS profile are "+
+				"TLS 1.3-only or unimplemented by Go",
+			len(profile.Ciphers),
+		)
 	}
 	// Keep usable suites when the profile lists ciphers so unusable IDs never reach the
 	// effective config. An empty list means no restriction; crc and the control plane use

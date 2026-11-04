@@ -142,9 +142,11 @@ func newResolveTestServer(t *testing.T, adherenceStatus int) *httptest.Server {
 	var statusBody string
 	switch adherenceStatus {
 	case http.StatusForbidden:
-		statusBody = `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"denied","reason":"Forbidden","code":403}`
+		statusBody = `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",` +
+			`"message":"denied","reason":"Forbidden","code":403}`
 	case http.StatusServiceUnavailable:
-		statusBody = `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"temporarily unavailable","reason":"ServiceUnavailable","code":503}`
+		statusBody = `{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",` +
+			`"message":"temporarily unavailable","reason":"ServiceUnavailable","code":503}`
 	default:
 		t.Fatalf("unsupported adherence status %d", adherenceStatus)
 	}
@@ -156,7 +158,10 @@ func newResolveTestServer(t *testing.T, adherenceStatus int) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/apiservers/cluster"):
 			apiServerReads++
 			if apiServerReads == 1 {
-				w.Write([]byte(`{"apiVersion":"config.openshift.io/v1","kind":"APIServer","metadata":{"name":"cluster"},"spec":{"tlsSecurityProfile":{"type":"Intermediate"}}}`))
+				w.Write([]byte(
+					`{"apiVersion":"config.openshift.io/v1","kind":"APIServer","metadata":{"name":"cluster"},` +
+						`"spec":{"tlsSecurityProfile":{"type":"Intermediate"}}}`,
+				))
 				return
 			}
 			w.WriteHeader(adherenceStatus)
@@ -185,7 +190,11 @@ func newResolveTestServer(t *testing.T, adherenceStatus int) *httptest.Server {
 	return srv
 }
 
-func newResolveProfilePolicyTestServer(t *testing.T, profile *configv1.TLSSecurityProfile, adherence configv1.TLSAdherencePolicy) *httptest.Server {
+func newResolveProfilePolicyTestServer(
+	t *testing.T,
+	profile *configv1.TLSSecurityProfile,
+	adherence configv1.TLSAdherencePolicy,
+) *httptest.Server {
 	t.Helper()
 	apiServer := &configv1.APIServer{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "config.openshift.io/v1", Kind: "APIServer"},
@@ -272,6 +281,33 @@ func TestResolve_EmptyCustomCiphersDependsOnAdherence(t *testing.T) {
 	}
 }
 
+func TestResolve_CustomGroupsApplied(t *testing.T) {
+	groups := []configv1.TLSGroup{
+		configv1.TLSGroupX25519,
+		configv1.TLSGroupSecP256r1,
+	}
+	profile := &configv1.TLSSecurityProfile{
+		Type: configv1.TLSProfileCustomType,
+		Custom: &configv1.CustomTLSProfile{TLSProfileSpec: configv1.TLSProfileSpec{
+			MinTLSVersion: configv1.VersionTLS12,
+			Groups:        groups,
+		}},
+	}
+	srv := newResolveProfilePolicyTestServer(t, profile, configv1.TLSAdherencePolicyNoOpinion)
+	result, err := Resolve(&restclient.Config{Host: srv.URL}, logr.Discard())
+	if err != nil {
+		t.Fatalf("unexpected error resolving groups from APIServer profile: %v", err)
+	}
+	if !slices.Equal(result.Profile.Groups, groups) {
+		t.Errorf("profile groups = %v, want %v", result.Profile.Groups, groups)
+	}
+	cfg := applyTLSOpts(t, result.TLSOpts)
+	want := []tls.CurveID{tls.X25519, tls.CurveP256}
+	if !slices.Equal(cfg.CurvePreferences, want) {
+		t.Errorf("CurvePreferences = %v, want %v", cfg.CurvePreferences, want)
+	}
+}
+
 func assertIntermediateProfileTLSOpts(t *testing.T, result *Result, profileRead bool) {
 	t.Helper()
 	profile := *configv1.TLSProfiles[configv1.TLSProfileIntermediateType]
@@ -344,7 +380,10 @@ func newResolveProfileErrorTestServer(t *testing.T, apiAvailable bool) *httptest
 			}`))
 		case strings.HasSuffix(r.URL.Path, "/apiservers/cluster"):
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(`{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"APIServer not found","reason":"NotFound","code":404}`))
+			w.Write([]byte(
+				`{"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",` +
+					`"message":"APIServer not found","reason":"NotFound","code":404}`,
+			))
 		default:
 			w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
 		}
@@ -451,6 +490,51 @@ func TestBuildProfileTLSOpts_UnusableCipherSuites(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cipher") {
 		t.Errorf("expected a cipher validation error, got: %v", err)
+	}
+}
+
+func TestBuildProfileTLSOpts_UnusableGroups(t *testing.T) {
+	profile := configv1.TLSProfileSpec{
+		MinTLSVersion: configv1.VersionTLS12,
+		Groups:        []configv1.TLSGroup{"unknown-group", "another-unknown-group"},
+	}
+
+	_, err := buildProfileTLSOpts(profile, logr.Discard())
+	if err == nil || !strings.Contains(err.Error(), "TLS profile has no usable groups") {
+		t.Fatalf("error = %v, want TLS profile has no usable groups", err)
+	}
+}
+
+func TestBuildProfileTLSOpts_EmptyGroupsUseGoDefaults(t *testing.T) {
+	profile := configv1.TLSProfileSpec{MinTLSVersion: configv1.VersionTLS12}
+
+	opts, err := buildProfileTLSOpts(profile, logr.Discard())
+	if err != nil {
+		t.Fatalf("unexpected error for empty groups: %v", err)
+	}
+	cfg := applyTLSOpts(t, opts)
+	if cfg.CurvePreferences != nil {
+		t.Errorf("CurvePreferences = %v, want nil for Go defaults", cfg.CurvePreferences)
+	}
+}
+
+func TestBuildProfileTLSOpts_MixedGroupsKeepUsableSubset(t *testing.T) {
+	profile := configv1.TLSProfileSpec{
+		MinTLSVersion: configv1.VersionTLS12,
+		Groups: []configv1.TLSGroup{
+			"unknown-group",
+			configv1.TLSGroupSecP256r1,
+		},
+	}
+
+	opts, err := buildProfileTLSOpts(profile, logr.Discard())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg := applyTLSOpts(t, opts)
+	want := []tls.CurveID{tls.CurveP256}
+	if !slices.Equal(cfg.CurvePreferences, want) {
+		t.Errorf("CurvePreferences = %v, want usable subset %v", cfg.CurvePreferences, want)
 	}
 }
 
