@@ -211,8 +211,8 @@ func usableCipherSuites(mapped []uint16) []uint16 {
 // Hybrid post-quantum CurveID values from Go 1.26+; named constants because
 // the repo's Go version may not export them and the mnd linter rejects raw hex.
 const (
-	curveSecP256r1MLKEM768  cryptotls.CurveID = 0x11EB // 4587
-	curveSecP384r1MLKEM1024 cryptotls.CurveID = 0x11ED // 4589
+	curveSecP256r1MLKEM768  tls.CurveID = 0x11EB // 4587
+	curveSecP384r1MLKEM1024 tls.CurveID = 0x11ED // 4589
 )
 
 var tlsGroupToCurveID = map[configv1.TLSGroup]tls.CurveID{
