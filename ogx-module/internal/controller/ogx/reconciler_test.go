@@ -2,6 +2,7 @@ package ogx
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -75,68 +77,180 @@ func TestFinalizerHelpers(t *testing.T) {
 	}
 }
 
-func TestAggregateOGXServerHealth(t *testing.T) {
+type rejectingOGXServerReader struct {
+	client.Client
+	listCalls int
+}
+
+func (r *rejectingOGXServerReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if isOGXServerList(list) {
+		r.listCalls++
+		return fmt.Errorf("failed to reject unexpected OGXServer list during module reconcile")
+	}
+	return r.Client.List(ctx, list, opts...)
+}
+
+func isOGXServerList(list client.ObjectList) bool {
+	gvk := list.GetObjectKind().GroupVersionKind()
+	return gvk.Group == "ogx.io" && (gvk.Kind == "OGXServer" || gvk.Kind == "OGXServerList")
+}
+
+func TestReconcileIgnoresOGXServerHealth(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		objects       []runtime.Object
-		wantTotal     int
-		wantUnhealthy int
-	}{
+	scheme := newTestScheme(t)
+	manifestsRoot := writeMinimalManifestTree(t)
+	instance := newTestOGX(7)
+	instance.Status.Conditions = []common.Condition{
 		{
-			name:          "empty cluster",
-			wantTotal:     0,
-			wantUnhealthy: 0,
+			Type:     string(common.ConditionTypeDegraded),
+			Status:   metav1.ConditionTrue,
+			Reason:   reasonUnhealthyOGXServers,
+			Message:  "Unhealthy OGXServer instances: ns/unhealthy",
+			Severity: common.ConditionSeverityInfo,
 		},
-		{
-			name:          "healthy ogxserver",
-			objects:       []runtime.Object{newOGXServerUnstructured("healthy", "ns", condition(ogxServerDeploymentReady, metav1.ConditionTrue), condition(ogxServerHealthCheck, metav1.ConditionTrue))},
-			wantTotal:     1,
-			wantUnhealthy: 0,
+	}
+	unhealthyServer := newOGXServerUnstructured("unhealthy", "ns", condition("DeploymentReady", metav1.ConditionFalse), condition("HealthCheck", metav1.ConditionFalse))
+
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&platformv1alpha1.OGX{}).
+		WithObjects(instance).
+		WithRuntimeObjects(unhealthyServer).
+		Build()
+	reader := &rejectingOGXServerReader{Client: base}
+	reconciler := NewReconciler(reader, reader, scheme, &moduleconfig.Config{
+		ManifestsPath:         manifestsRoot,
+		ApplicationsNamespace: "opendatahub-ogx-system",
+		PlatformName:          "OpenDataHub",
+		PlatformVersion:       "test-version",
+	}, nil, nil)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(instance)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want 0", result.RequeueAfter)
+	}
+	if reader.listCalls != 0 {
+		t.Fatalf("OGXServer List calls = %d, want 0", reader.listCalls)
+	}
+
+	updated := &platformv1alpha1.OGX{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(instance), updated); err != nil {
+		t.Fatalf("Get(updated OGX): %v", err)
+	}
+	if updated.Status.Phase != common.PhaseReady {
+		t.Fatalf("Phase = %q, want %q", updated.Status.Phase, common.PhaseReady)
+	}
+	assertConditionStatus(t, updated, string(common.ConditionTypeReady), metav1.ConditionTrue)
+	assertConditionAbsent(t, updated, string(common.ConditionTypeDegraded))
+}
+
+func TestReconcileRootOperatorNotReady(t *testing.T) {
+	t.Parallel()
+
+	scheme := newTestScheme(t)
+	manifestsRoot := writeMinimalManifestTreeWithDeployment(t)
+	instance := newTestOGX(3)
+	deployment := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "Deployment",
 		},
-		{
-			name:          "deployment not ready is unhealthy",
-			objects:       []runtime.Object{newOGXServerUnstructured("unhealthy", "ns", condition(ogxServerDeploymentReady, metav1.ConditionFalse))},
-			wantTotal:     1,
-			wantUnhealthy: 1,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ogx-controller-manager",
+			Namespace: "opendatahub-ogx-system",
 		},
-		{
-			name:          "no conditions is unhealthy",
-			objects:       []runtime.Object{newOGXServerUnstructuredNoConditions("no-conditions", "ns")},
-			wantTotal:     1,
-			wantUnhealthy: 1,
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
 		},
-		{
-			name:          "mixed health",
-			objects:       []runtime.Object{newOGXServerUnstructured("healthy", "ns-a", condition(ogxServerDeploymentReady, metav1.ConditionTrue), condition(ogxServerHealthCheck, metav1.ConditionTrue)), newOGXServerUnstructured("unhealthy", "ns-b", condition(ogxServerHealthCheck, metav1.ConditionFalse))},
-			wantTotal:     2,
-			wantUnhealthy: 1,
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			ReadyReplicas:      0,
+			AvailableReplicas:  0,
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&platformv1alpha1.OGX{}, &appsv1.Deployment{}).
+		WithObjects(instance, deployment).
+		Build()
+	reader := &rejectingOGXServerReader{Client: cli}
+	reconciler := NewReconciler(reader, reader, scheme, &moduleconfig.Config{
+		ManifestsPath:         manifestsRoot,
+		ApplicationsNamespace: "opendatahub-ogx-system",
+		PlatformName:          "OpenDataHub",
+		PlatformVersion:       "test-version",
+	}, nil, nil)
 
-			cli := fake.NewClientBuilder().WithRuntimeObjects(tt.objects...).Build()
-			reconciler := &Reconciler{
-				Client:    cli,
-				APIReader: cli,
-			}
-
-			got, err := reconciler.aggregateOGXServerHealth(context.Background())
-			if err != nil {
-				t.Fatalf("aggregateOGXServerHealth() error = %v", err)
-			}
-			if got.Total != tt.wantTotal {
-				t.Fatalf("aggregateOGXServerHealth().Total = %d, want %d", got.Total, tt.wantTotal)
-			}
-			if got.UnhealthyCount != tt.wantUnhealthy {
-				t.Fatalf("aggregateOGXServerHealth().UnhealthyCount = %d, want %d", got.UnhealthyCount, tt.wantUnhealthy)
-			}
-		})
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(instance)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
 	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("expected RequeueAfter when root operator deployment is not ready")
+	}
+	if reader.listCalls != 0 {
+		t.Fatalf("OGXServer List calls = %d, want 0", reader.listCalls)
+	}
+
+	updated := &platformv1alpha1.OGX{}
+	if err := cli.Get(context.Background(), client.ObjectKeyFromObject(instance), updated); err != nil {
+		t.Fatalf("Get(updated OGX): %v", err)
+	}
+	if updated.Status.Phase != common.PhaseNotReady {
+		t.Fatalf("Phase = %q, want %q", updated.Status.Phase, common.PhaseNotReady)
+	}
+	assertConditionStatus(t, updated, string(common.ConditionTypeReady), metav1.ConditionFalse)
+	assertCondition(t, updated, conditionTypeRootOperatorReady, metav1.ConditionFalse, "Deploying")
+	assertConditionStatus(t, updated, string(common.ConditionTypeProvisioningSucceeded), metav1.ConditionTrue)
+	assertConditionAbsent(t, updated, string(common.ConditionTypeDegraded))
+}
+
+func TestReconcileWebhookNotReady(t *testing.T) {
+	t.Parallel()
+
+	scheme := newTestScheme(t)
+	manifestsRoot := writeMinimalManifestTreeWithWebhook(t)
+	instance := newTestOGX(4)
+
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&platformv1alpha1.OGX{}).
+		WithObjects(instance).
+		Build()
+	reader := &rejectingOGXServerReader{Client: cli}
+	reconciler := NewReconciler(reader, reader, scheme, &moduleconfig.Config{
+		ManifestsPath:         manifestsRoot,
+		ApplicationsNamespace: "opendatahub-ogx-system",
+		PlatformName:          "OpenDataHub",
+		PlatformVersion:       "test-version",
+	}, nil, nil)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(instance)})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("expected RequeueAfter when root webhook resources are not ready")
+	}
+	if reader.listCalls != 0 {
+		t.Fatalf("OGXServer List calls = %d, want 0", reader.listCalls)
+	}
+
+	updated := &platformv1alpha1.OGX{}
+	if err := cli.Get(context.Background(), client.ObjectKeyFromObject(instance), updated); err != nil {
+		t.Fatalf("Get(updated OGX): %v", err)
+	}
+	if updated.Status.Phase != common.PhaseNotReady {
+		t.Fatalf("Phase = %q, want %q", updated.Status.Phase, common.PhaseNotReady)
+	}
+	assertConditionStatus(t, updated, string(common.ConditionTypeReady), metav1.ConditionFalse)
+	assertCondition(t, updated, conditionTypeRootWebhookReady, metav1.ConditionFalse, "WebhookNotReady")
+	assertConditionAbsent(t, updated, string(common.ConditionTypeDegraded))
 }
 
 func TestRootWebhookResourcesReady(t *testing.T) {
@@ -511,23 +625,29 @@ func TestSetPlatformRelease(t *testing.T) {
 func TestUpdateStatus(t *testing.T) {
 	t.Parallel()
 
+	unrelatedReason := "CertificateExpiring"
+	falseStatus := metav1.ConditionFalse
+	trueStatus := metav1.ConditionTrue
+
 	tests := []struct {
 		name               string
 		state              common.ManagementState
+		existing           []common.Condition
 		provisioning       bool
 		rootReady          bool
 		webhookReady       bool
-		health             ogxServerHealthSummary
 		reconcileErr       error
 		wantPhase          common.Phase
 		wantReady          metav1.ConditionStatus
 		wantProvisioned    metav1.ConditionStatus
-		wantDegraded       metav1.ConditionStatus
+		wantRootReady      metav1.ConditionStatus
 		wantWebhookReady   metav1.ConditionStatus
+		wantDegraded       *metav1.ConditionStatus
+		wantDegradedReason string
 		wantReleaseEntries int
 	}{
 		{
-			name:               "ready and healthy",
+			name:               "ready module does not set degraded from server health",
 			state:              common.Managed,
 			provisioning:       true,
 			rootReady:          true,
@@ -535,26 +655,75 @@ func TestUpdateStatus(t *testing.T) {
 			wantPhase:          common.PhaseReady,
 			wantReady:          metav1.ConditionTrue,
 			wantProvisioned:    metav1.ConditionTrue,
-			wantDegraded:       metav1.ConditionFalse,
+			wantRootReady:      metav1.ConditionTrue,
 			wantWebhookReady:   metav1.ConditionTrue,
 			wantReleaseEntries: 3,
 		},
 		{
-			name:         "ready but degraded",
-			state:        common.Managed,
-			provisioning: true,
-			rootReady:    true,
-			webhookReady: true,
-			health: ogxServerHealthSummary{
-				Total:          2,
-				UnhealthyCount: 1,
-				Unhealthy:      []string{"ns-a/unhealthy"},
+			name:  "clears pre-existing UnhealthyOGXServers when module is healthy",
+			state: common.Managed,
+			existing: []common.Condition{
+				{
+					Type:     string(common.ConditionTypeDegraded),
+					Status:   metav1.ConditionTrue,
+					Reason:   reasonUnhealthyOGXServers,
+					Message:  "Unhealthy OGXServer instances: ns-a/unhealthy",
+					Severity: common.ConditionSeverityInfo,
+				},
 			},
+			provisioning:       true,
+			rootReady:          true,
+			webhookReady:       true,
 			wantPhase:          common.PhaseReady,
 			wantReady:          metav1.ConditionTrue,
 			wantProvisioned:    metav1.ConditionTrue,
-			wantDegraded:       metav1.ConditionTrue,
+			wantRootReady:      metav1.ConditionTrue,
 			wantWebhookReady:   metav1.ConditionTrue,
+			wantReleaseEntries: 3,
+		},
+		{
+			name:  "clears old False Healthy degraded condition",
+			state: common.Managed,
+			existing: []common.Condition{
+				{
+					Type:     string(common.ConditionTypeDegraded),
+					Status:   metav1.ConditionFalse,
+					Reason:   reasonHealthy,
+					Message:  "No unhealthy OGXServer instances detected",
+					Severity: common.ConditionSeverityInfo,
+				},
+			},
+			provisioning:       true,
+			rootReady:          true,
+			webhookReady:       true,
+			wantPhase:          common.PhaseReady,
+			wantReady:          metav1.ConditionTrue,
+			wantProvisioned:    metav1.ConditionTrue,
+			wantRootReady:      metav1.ConditionTrue,
+			wantWebhookReady:   metav1.ConditionTrue,
+			wantReleaseEntries: 3,
+		},
+		{
+			name:  "retains unrelated degraded reason on healthy path",
+			state: common.Managed,
+			existing: []common.Condition{
+				{
+					Type:    string(common.ConditionTypeDegraded),
+					Status:  metav1.ConditionTrue,
+					Reason:  unrelatedReason,
+					Message: "serving certificate is nearing expiry",
+				},
+			},
+			provisioning:       true,
+			rootReady:          true,
+			webhookReady:       true,
+			wantPhase:          common.PhaseReady,
+			wantReady:          metav1.ConditionTrue,
+			wantProvisioned:    metav1.ConditionTrue,
+			wantRootReady:      metav1.ConditionTrue,
+			wantWebhookReady:   metav1.ConditionTrue,
+			wantDegraded:       &trueStatus,
+			wantDegradedReason: unrelatedReason,
 			wantReleaseEntries: 3,
 		},
 		{
@@ -563,7 +732,22 @@ func TestUpdateStatus(t *testing.T) {
 			wantPhase:          common.PhaseNotReady,
 			wantReady:          metav1.ConditionFalse,
 			wantProvisioned:    metav1.ConditionFalse,
-			wantDegraded:       metav1.ConditionFalse,
+			wantRootReady:      metav1.ConditionFalse,
+			wantWebhookReady:   metav1.ConditionFalse,
+			wantDegraded:       &falseStatus,
+			wantDegradedReason: "Removed",
+			wantReleaseEntries: 3,
+		},
+		{
+			name:               "root operator not ready keeps module not ready",
+			state:              common.Managed,
+			provisioning:       true,
+			rootReady:          false,
+			webhookReady:       false,
+			wantPhase:          common.PhaseNotReady,
+			wantReady:          metav1.ConditionFalse,
+			wantProvisioned:    metav1.ConditionTrue,
+			wantRootReady:      metav1.ConditionFalse,
 			wantWebhookReady:   metav1.ConditionFalse,
 			wantReleaseEntries: 3,
 		},
@@ -576,8 +760,22 @@ func TestUpdateStatus(t *testing.T) {
 			wantPhase:          common.PhaseNotReady,
 			wantReady:          metav1.ConditionFalse,
 			wantProvisioned:    metav1.ConditionTrue,
-			wantDegraded:       metav1.ConditionFalse,
+			wantRootReady:      metav1.ConditionTrue,
 			wantWebhookReady:   metav1.ConditionFalse,
+			wantReleaseEntries: 3,
+		},
+		{
+			name:               "deploy failure overwrites degraded",
+			state:              common.Managed,
+			existing:           []common.Condition{{Type: string(common.ConditionTypeDegraded), Status: metav1.ConditionTrue, Reason: unrelatedReason}},
+			reconcileErr:       fmt.Errorf("failed to apply manifests"),
+			wantPhase:          common.PhaseNotReady,
+			wantReady:          metav1.ConditionFalse,
+			wantProvisioned:    metav1.ConditionFalse,
+			wantRootReady:      metav1.ConditionFalse,
+			wantWebhookReady:   metav1.ConditionFalse,
+			wantDegraded:       &falseStatus,
+			wantDegradedReason: "DeployFailed",
 			wantReleaseEntries: 3,
 		},
 	}
@@ -586,28 +784,11 @@ func TestUpdateStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			scheme := runtime.NewScheme()
-			if err := clientgoscheme.AddToScheme(scheme); err != nil {
-				t.Fatalf("AddToScheme(clientgoscheme): %v", err)
-			}
-			if err := platformv1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatalf("AddToScheme(platformv1alpha1): %v", err)
-			}
-
+			scheme := newTestScheme(t)
 			manifestsRoot := writeComponentMetadata(t)
-			instance := &platformv1alpha1.OGX{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: platformv1alpha1.GroupVersion.String(),
-					Kind:       platformv1alpha1.OGXKind,
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       platformv1alpha1.OGXInstanceName,
-					Generation: 7,
-				},
-				Spec: platformv1alpha1.OGXSpec{
-					ManagementSpec: common.ManagementSpec{ManagementState: tt.state},
-				},
-			}
+			instance := newTestOGX(7)
+			instance.Spec.ManagementSpec.ManagementState = tt.state
+			instance.Status.Conditions = append([]common.Condition(nil), tt.existing...)
 
 			cli := fake.NewClientBuilder().
 				WithScheme(scheme).
@@ -625,7 +806,7 @@ func TestUpdateStatus(t *testing.T) {
 				},
 			}
 
-			if err := reconciler.updateStatus(context.Background(), instance, tt.provisioning, tt.rootReady, tt.webhookReady, tt.health, tt.reconcileErr); err != nil {
+			if err := reconciler.updateStatus(context.Background(), instance, tt.provisioning, tt.rootReady, tt.webhookReady, tt.reconcileErr); err != nil {
 				t.Fatalf("updateStatus() error = %v", err)
 			}
 
@@ -647,8 +828,13 @@ func TestUpdateStatus(t *testing.T) {
 
 			assertConditionStatus(t, updated, string(common.ConditionTypeReady), tt.wantReady)
 			assertConditionStatus(t, updated, string(common.ConditionTypeProvisioningSucceeded), tt.wantProvisioned)
-			assertConditionStatus(t, updated, string(common.ConditionTypeDegraded), tt.wantDegraded)
+			assertConditionStatus(t, updated, conditionTypeRootOperatorReady, tt.wantRootReady)
 			assertConditionStatus(t, updated, conditionTypeRootWebhookReady, tt.wantWebhookReady)
+			if tt.wantDegraded == nil {
+				assertConditionAbsent(t, updated, string(common.ConditionTypeDegraded))
+			} else {
+				assertCondition(t, updated, string(common.ConditionTypeDegraded), *tt.wantDegraded, tt.wantDegradedReason)
+			}
 		})
 	}
 }
@@ -684,17 +870,73 @@ func containsFinalizer(instance *platformv1alpha1.OGX, value string) bool {
 
 func assertConditionStatus(t *testing.T, instance *platformv1alpha1.OGX, conditionType string, want metav1.ConditionStatus) {
 	t.Helper()
+	assertCondition(t, instance, conditionType, want, "")
+}
 
-	for _, condition := range instance.Status.Conditions {
-		if condition.Type == conditionType {
-			if condition.Status != want {
-				t.Fatalf("condition %s status = %s, want %s", conditionType, condition.Status, want)
-			}
-			return
+func assertCondition(t *testing.T, instance *platformv1alpha1.OGX, conditionType string, want metav1.ConditionStatus, wantReason string) {
+	t.Helper()
+
+	cond := findCondition(instance, conditionType)
+	if cond == nil {
+		t.Fatalf("condition %s not found", conditionType)
+	}
+	if cond.Status != want {
+		t.Fatalf("condition %s status = %s, want %s", conditionType, cond.Status, want)
+	}
+	if wantReason != "" && cond.Reason != wantReason {
+		t.Fatalf("condition %s reason = %s, want %s", conditionType, cond.Reason, wantReason)
+	}
+}
+
+func assertConditionAbsent(t *testing.T, instance *platformv1alpha1.OGX, conditionType string) {
+	t.Helper()
+
+	if cond := findCondition(instance, conditionType); cond != nil {
+		t.Fatalf("condition %s present with status=%s reason=%s, want absent", conditionType, cond.Status, cond.Reason)
+	}
+}
+
+func findCondition(instance *platformv1alpha1.OGX, conditionType string) *common.Condition {
+	for i := range instance.Status.Conditions {
+		if instance.Status.Conditions[i].Type == conditionType {
+			cond := instance.Status.Conditions[i]
+			return &cond
 		}
 	}
+	return nil
+}
 
-	t.Fatalf("condition %s not found", conditionType)
+func newTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(clientgoscheme): %v", err)
+	}
+	if err := platformv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(platformv1alpha1): %v", err)
+	}
+	return scheme
+}
+
+func newTestOGX(generation int64) *platformv1alpha1.OGX {
+	return &platformv1alpha1.OGX{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: platformv1alpha1.GroupVersion.String(),
+			Kind:       platformv1alpha1.OGXKind,
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       platformv1alpha1.OGXInstanceName,
+			Generation: generation,
+		},
+		Spec: platformv1alpha1.OGXSpec{
+			ManagementSpec: common.ManagementSpec{ManagementState: common.Managed},
+		},
+	}
+}
+
+func int32Ptr(value int32) *int32 {
+	return &value
 }
 
 func writeComponentMetadata(t *testing.T) string {
@@ -742,11 +984,82 @@ resources: []
 	return root
 }
 
+func writeMinimalManifestTreeWithDeployment(t *testing.T) string {
+	t.Helper()
+
+	root := writeMinimalManifestTree(t)
+	overlayDir := filepath.Join(root, componentName, overlayODH)
+	deployment := []byte(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ogx-controller-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ogx
+  template:
+    metadata:
+      labels:
+        app: ogx
+    spec:
+      containers:
+      - name: manager
+        image: example.com/ogx:test
+`)
+	if err := os.WriteFile(filepath.Join(overlayDir, "deployment.yaml"), deployment, 0o644); err != nil {
+		t.Fatalf("WriteFile(deployment.yaml): %v", err)
+	}
+	kustomization := []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- deployment.yaml
+`)
+	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"), kustomization, 0o644); err != nil {
+		t.Fatalf("WriteFile(kustomization.yaml): %v", err)
+	}
+	return root
+}
+
+func writeMinimalManifestTreeWithWebhook(t *testing.T) string {
+	t.Helper()
+
+	root := writeMinimalManifestTree(t)
+	overlayDir := filepath.Join(root, componentName, overlayODH)
+	webhook := []byte(`apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- name: vogxserver.kb.io
+  admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: opendatahub-ogx-system
+  sideEffects: None
+`)
+	if err := os.WriteFile(filepath.Join(overlayDir, "webhook.yaml"), webhook, 0o644); err != nil {
+		t.Fatalf("WriteFile(webhook.yaml): %v", err)
+	}
+	kustomization := []byte(`apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- webhook.yaml
+`)
+	if err := os.WriteFile(filepath.Join(overlayDir, "kustomization.yaml"), kustomization, 0o644); err != nil {
+		t.Fatalf("WriteFile(kustomization.yaml): %v", err)
+	}
+	return root
+}
+
 func newOGXServerUnstructured(name, namespace string, conditions ...map[string]any) *unstructured.Unstructured {
+	gvk := schema.GroupVersionKind{Group: "ogx.io", Version: "v1beta1", Kind: "OGXServer"}
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
-			"apiVersion": ogxServerGVK.GroupVersion().String(),
-			"kind":       ogxServerGVK.Kind,
+			"apiVersion": gvk.GroupVersion().String(),
+			"kind":       gvk.Kind,
 			"metadata": map[string]any{
 				"name":      name,
 				"namespace": namespace,
@@ -756,7 +1069,7 @@ func newOGXServerUnstructured(name, namespace string, conditions ...map[string]a
 			},
 		},
 	}
-	obj.SetGroupVersionKind(ogxServerGVK)
+	obj.SetGroupVersionKind(gvk)
 	return obj
 }
 
@@ -819,22 +1132,6 @@ func condition(conditionType string, status metav1.ConditionStatus) map[string]a
 		"type":   conditionType,
 		"status": string(status),
 	}
-}
-
-func newOGXServerUnstructuredNoConditions(name, namespace string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{
-		Object: map[string]any{
-			"apiVersion": ogxServerGVK.GroupVersion().String(),
-			"kind":       ogxServerGVK.Kind,
-			"metadata": map[string]any{
-				"name":      name,
-				"namespace": namespace,
-			},
-			"status": map[string]any{},
-		},
-	}
-	obj.SetGroupVersionKind(ogxServerGVK)
-	return obj
 }
 
 func TestPlatformOperatorVersionMatchesManager(t *testing.T) {
