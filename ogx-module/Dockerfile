@@ -1,5 +1,5 @@
 # Build the ogx-module manager binary.
-ARG GOLANG_VERSION=1.25
+ARG GOLANG_VERSION=1.26
 
 # Use BUILDPLATFORM so the builder itself always runs natively, while the Go
 # binary is cross-compiled for TARGETPLATFORM.
