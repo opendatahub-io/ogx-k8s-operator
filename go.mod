@@ -1,6 +1,6 @@
 module github.com/ogx-ai/ogx-k8s-operator
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/go-logr/logr v1.4.4
