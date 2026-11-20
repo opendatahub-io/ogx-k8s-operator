@@ -14,7 +14,9 @@ spec:
       scheme: https
       bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
       tlsConfig:
-        serverName: ogx-k8s-operator-controller-manager-metrics-service.ogx-k8s-operator-system.svc
+        # NAMESPACE is filled by kustomize replacements in each overlay that
+        # sets a namespace, so serverName always matches the deployed Service.
+        serverName: ogx-k8s-operator-controller-manager-metrics-service.NAMESPACE.svc
         ca:
           configMap:
             name: openshift-service-ca.crt

@@ -16,6 +16,21 @@ configMapGenerator:
       - params.env
 
 replacements:
+  # Derive the ServiceMonitor tlsConfig.serverName namespace segment from the
+  # metrics Service's actual namespace (opendatahub in this overlay).
+  - source:
+      kind: Service
+      name: controller-manager-metrics-service
+      fieldPath: metadata.namespace
+    targets:
+      - select:
+          kind: ServiceMonitor
+          name: controller-manager-metrics-monitor
+        fieldPaths:
+          - spec.endpoints.0.tlsConfig.serverName
+        options:
+          delimiter: "."
+          index: 1
   - source:
       kind: ConfigMap
       name: params
