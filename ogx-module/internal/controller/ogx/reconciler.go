@@ -53,8 +53,8 @@ const (
 	ogxFinalizer                   = "components.platform.opendatahub.io/ogx-finalizer"
 	conditionTypeRootOperatorReady = "RootOperatorReady"
 	conditionTypeRootWebhookReady  = "RootWebhookReady"
-	ogxServerDeploymentReady       = "DeploymentReady"
-	ogxServerHealthCheck           = "HealthCheck"
+	reasonUnhealthyOGXServers      = "UnhealthyOGXServers"
+	reasonHealthy                  = "Healthy"
 
 	// platformConfigCMName is the ODH-managed ConfigMap (odh-<module>-config)
 	// that carries data.platformVersion for the version handshake.
@@ -71,8 +71,7 @@ var (
 	namespaceGVK      = corev1.SchemeGroupVersion.WithKind("Namespace")
 	serviceMonitorGVK = schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor"}
 	prometheusRuleGVK = schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "PrometheusRule"}
-	ogxServerGVK      = schema.GroupVersionKind{Group: "ogx.io", Version: "v1beta1", Kind: "OGXServer"}
-	imageParamEnvMap = map[string][]string{
+	imageParamEnvMap  = map[string][]string{
 		"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE": {"RELATED_IMAGE_ODH_OGX_K8S_OPERATOR_IMAGE"},
 		"RELATED_IMAGE_ODH_OGX_CORE_IMAGE":         {"RELATED_IMAGE_ODH_OGX_CORE_IMAGE"},
 	}
@@ -84,12 +83,6 @@ type componentMetadata struct {
 
 type gcRunner interface {
 	Run(context.Context, odhgc.RunParams) error
-}
-
-type ogxServerHealthSummary struct {
-	Total          int
-	UnhealthyCount int
-	Unhealthy      []string
 }
 
 // Reconciler manages the ODH-facing OGX CR and deploys the staged root OGX
@@ -191,7 +184,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !instance.DeletionTimestamp.IsZero() || managementState(instance) == common.Removed {
 		err = r.cleanupRootOperatorResources(ctx, instance)
-		if statusErr := r.updateStatus(ctx, instance, false, false, false, ogxServerHealthSummary{}, err); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, instance, false, false, false, err); statusErr != nil {
 			logger.Error(statusErr, "failed to update removed status")
 			if err == nil {
 				err = statusErr
@@ -231,13 +224,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, webhookErr
 	}
 
-	healthSummary, healthErr := r.aggregateOGXServerHealth(ctx)
-	if healthErr != nil {
-		r.updateStatusOnError(ctx, instance, true, deploymentsReady, webhookReady, healthErr, "failed to update status after OGXServer health error")
-		return ctrl.Result{}, healthErr
-	}
-
-	if err := r.updateStatus(ctx, instance, true, deploymentsReady, webhookReady, healthSummary, nil); err != nil {
+	if err := r.updateStatus(ctx, instance, true, deploymentsReady, webhookReady, nil); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -478,75 +465,12 @@ func webhookSecretRefsFromDeployment(obj *unstructured.Unstructured) ([]client.O
 	return refs, nil
 }
 
-func (r *Reconciler) aggregateOGXServerHealth(ctx context.Context) (ogxServerHealthSummary, error) {
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(ogxServerGVK.GroupVersion().WithKind("OGXServerList"))
-
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
-
-	if err := reader.List(ctx, list); err != nil {
-		switch {
-		case apimeta.IsNoMatchError(err), apierrors.IsNotFound(err):
-			return ogxServerHealthSummary{}, nil
-		default:
-			return ogxServerHealthSummary{}, fmt.Errorf("failed to list OGXServer instances: %w", err)
-		}
-	}
-
-	summary := ogxServerHealthSummary{
-		Total: len(list.Items),
-	}
-
-	for i := range list.Items {
-		obj := &list.Items[i]
-		if !ogxServerIsHealthy(obj) {
-			summary.UnhealthyCount++
-			summary.Unhealthy = append(summary.Unhealthy, fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()))
-		}
-	}
-
-	return summary, nil
-}
-
-func ogxServerIsHealthy(obj *unstructured.Unstructured) bool {
-	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	if err != nil || !found {
-		return false
-	}
-
-	deploymentReadyFalse := hasConditionStatus(conditions, ogxServerDeploymentReady, metav1.ConditionFalse)
-	healthCheckFalse := hasConditionStatus(conditions, ogxServerHealthCheck, metav1.ConditionFalse)
-
-	return !deploymentReadyFalse && !healthCheckFalse
-}
-
-func hasConditionStatus(conditions []interface{}, conditionType string, status metav1.ConditionStatus) bool {
-	for i := range conditions {
-		item, ok := conditions[i].(map[string]any)
-		if !ok {
-			continue
-		}
-
-		currentType, _ := item["type"].(string)
-		currentStatus, _ := item["status"].(string)
-		if currentType == conditionType && currentStatus == string(status) {
-			return true
-		}
-	}
-
-	return false
-}
-
 func (r *Reconciler) updateStatus(
 	ctx context.Context,
 	instance *platformv1alpha1.OGX,
 	provisioningSucceeded bool,
 	rootOperatorReady bool,
 	rootWebhookReady bool,
-	healthSummary ogxServerHealthSummary,
 	reconcileErr error,
 ) error {
 	if err := r.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
@@ -696,22 +620,8 @@ func (r *Reconciler) updateStatus(
 		)
 	}
 
-	if healthSummary.UnhealthyCount > 0 {
-		cm.MarkTrue(
-			string(common.ConditionTypeDegraded),
-			observed,
-			odhconditions.WithReason("UnhealthyOGXServers"),
-			odhconditions.WithMessage("Unhealthy OGXServer instances: %s", strings.Join(healthSummary.Unhealthy, ", ")),
-			odhconditions.WithSeverity(common.ConditionSeverityInfo),
-		)
-	} else {
-		cm.MarkFalse(
-			string(common.ConditionTypeDegraded),
-			observed,
-			odhconditions.WithReason("Healthy"),
-			odhconditions.WithMessage("No unhealthy OGXServer instances detected"),
-			odhconditions.WithSeverity(common.ConditionSeverityInfo),
-		)
+	if managementState(instance) != common.Removed && reconcileErr == nil {
+		clearLegacyOGXServerHealthDegraded(cm)
 	}
 
 	cm.Sort()
@@ -733,8 +643,28 @@ func (r *Reconciler) updateStatusOnError(
 	reconcileErr error,
 	statusLogMsg string,
 ) {
-	if statusErr := r.updateStatus(ctx, instance, provisioningSucceeded, rootOperatorReady, rootWebhookReady, ogxServerHealthSummary{}, reconcileErr); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, instance, provisioningSucceeded, rootOperatorReady, rootWebhookReady, reconcileErr); statusErr != nil {
 		log.FromContext(ctx).Error(statusErr, statusLogMsg)
+	}
+}
+
+func clearLegacyOGXServerHealthDegraded(cm *odhconditions.Manager) {
+	cond := cm.GetCondition(string(common.ConditionTypeDegraded))
+	if cond == nil || !isLegacyOGXServerHealthDegraded(*cond) {
+		return
+	}
+
+	cm.ClearCondition(string(common.ConditionTypeDegraded))
+}
+
+func isLegacyOGXServerHealthDegraded(cond common.Condition) bool {
+	switch cond.Reason {
+	case reasonUnhealthyOGXServers:
+		return cond.Status == metav1.ConditionTrue
+	case reasonHealthy:
+		return cond.Status == metav1.ConditionFalse
+	default:
+		return false
 	}
 }
 
