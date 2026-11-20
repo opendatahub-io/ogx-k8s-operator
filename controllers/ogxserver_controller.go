@@ -1877,6 +1877,15 @@ func (r *OGXServerReconciler) detectODHTrustedCABundle(ctx context.Context, inst
 			"key", key)
 	}
 
+	// Sort keys to guarantee deterministic ordering: Go map iteration order
+	// is randomized, and downstream the bundle is built by concatenating the
+	// values in key order. Without sorting, ConfigMaps with multiple keys
+	// (e.g. odh-trusted-ca-bundle on disconnected clusters, which carries
+	// both ca-bundle.crt and odh-ca-bundle.crt) produce a different bundle
+	// string per reconcile, causing endless ConfigMap patches and deployment
+	// rollouts.
+	sort.Strings(keys)
+
 	logger.V(1).Info("ODH trusted CA bundle ConfigMap detected",
 		"configMapName", odhTrustedCABundleConfigMap,
 		"namespace", instance.Namespace,
